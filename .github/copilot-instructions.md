@@ -4,46 +4,71 @@ Purpose: Enable AI agents to quickly and safely enhance the Home Assistant custo
 
 ## Architecture Overview
 - Domain: `custom_components/smart_cooling/` implements a physics-based thermal model with strategy recommendations and self-learning capabilities.
-- Core modules:
-  - `thermal_model.py`: Physics calculations (heat gain, cooling rates, temperature prediction).
-  - `strategy_engine.py`: Recommends optimal cooling method (window, fan, AC) based on predictions.
-  - `learning_module.py`: Records predictions vs actuals, computes gradient-based parameter adjustments.
-  - `coordinator.py`: HA DataUpdateCoordinator that orchestrates model updates and sensor refresh.
-  - `historical_replay.py`: Testing infrastructure for validating model against historical data.
-- Platforms:
-  - `sensor.py`: Exposes prediction sensors (recommended strategy, predicted temp, confidence, time to comfort).
-- Config & Options flows: `config_flow.py` drives multi-step forms for sensor selection, target temps, bedtime, and optional learning.
-- Constants: `const.py` centralizes physics defaults, config keys, and domain constants.
+- **Multi-instance**: Supports multiple rooms, each with its own physics simulation and output sensors.
+- **Shared global config**: Weather entity (hourly forecast), outdoor temp, and AQI are shared across all rooms.
+- **Per-room config**: Indoor temp, humidity, window/fan/AC sensors, target temp/time helpers.
+
+### Core Modules
+- `thermal_model.py`: Physics calculations (heat gain, cooling rates, temperature prediction).
+- `strategy_engine.py`: Recommends optimal cooling method (window, fan, AC) based on predictions.
+- `learning_module.py`: Records predictions vs actuals, computes gradient-based parameter adjustments per room.
+- `coordinator.py`: HA DataUpdateCoordinator that orchestrates model updates and sensor refresh per room.
+- `historical_replay.py`: Testing infrastructure for validating model against historical data.
+
+### Platforms
+- `sensor.py`: Exposes per-room prediction sensors (recommended strategy, predicted temp, confidence, time to target).
+
+### Configuration
+- `config_flow.py`: Multi-step forms. First setup collects global sensors, subsequent setups reuse them.
+- `const.py`: Centralizes physics defaults, config keys (global vs per-room), and domain constants.
 
 ## Key Patterns & Conventions
-- **Unique IDs**: Prefixed with `entry.entry_id` plus semantic suffix (e.g., `_predicted_temp`, `_cooling_strategy`). Follow this pattern for multi-instance safety.
-- **Coordinator pattern**: All sensor entities subscribe to `SmartCoolingCoordinator`. Updates flow through `async_update_data()` which refreshes the thermal model and strategy.
-- **Physics parameters**: Stored in `const.py` defaults but overridable via learning module. Key params:
-  - `base_heat_gain_rate`, `solar_gain_factor`: Heat accumulation
-  - `fan_cooling_coefficient`, `ac_cooling_rate_mild`, `ac_cooling_rate_hot`: Cooling effectiveness
-- **Async rules**: All I/O and HA interactions are `async`. Avoid blocking calls—use `hass.async_add_executor_job()` for pandas operations in historical replay.
-- **Dataclasses**: Use `TemperaturePrediction` and `CoolingStrategy` dataclasses for structured return values with `to_dict()` methods.
-- **Learning persistence**: Learning data stored to `.storage/smart_cooling/` via HA's storage helper. Never write directly to files.
+- **Multi-instance safety**: Unique IDs prefixed with `entry.entry_id` plus semantic suffix.
+- **Global config storage**: `hass.data[DOMAIN][GLOBAL_CONFIG_KEY]` stores shared weather/outdoor/AQI config.
+- **Coordinator pattern**: Each room has its own `SmartCoolingCoordinator` instance.
+- **Hourly forecast**: Weather entity must support `weather.get_forecasts` service with `type: hourly`. Wind speed is extracted from the forecast array items (`forecast[i].wind_speed`).
+- **Target helpers**: Uses `input_number` for target temp and `input_datetime` for target time (when to reach target).
+- **Async rules**: All I/O and HA interactions are `async`. Use `hass.async_add_executor_job()` for blocking operations.
+- **Dataclasses**: Use `TemperaturePrediction` and `CoolingStrategy` for structured return values.
+- **Learning persistence**: Per-room learning data stored to `.storage/smart_cooling/{entry_id}/`.
+
+## Config Keys (const.py)
+### Global (shared across rooms)
+- `CONF_WEATHER_ENTITY`: Weather entity with hourly forecast (wind_speed in forecast items)
+- `CONF_OUTDOOR_TEMP_SENSOR`: Outdoor temperature sensor
+- `CONF_AQI_SENSOR`: Air quality index sensor
+
+### Per-Room
+- `CONF_ROOM_NAME`: Human-readable room name for instance title
+- `CONF_INDOOR_TEMP_SENSOR`: Room temperature sensor
+- `CONF_INDOOR_HUMIDITY_SENSOR`: Room humidity sensor (optional)
+- `CONF_WINDOW_SENSOR`, `CONF_FAN_SENSOR`, `CONF_AC_SENSOR`: Device state binary_sensors
+- `CONF_TARGET_TEMP_ENTITY`: Target temperature helper (input_number)
+- `CONF_TARGET_TIME_ENTITY`: Target time helper (input_datetime) - when to reach target
 
 ## Data Flow
-1. Coordinator polls weather entities (outdoor temp) and indoor sensors at configured interval.
-2. `ThermalModel.predict_temperature()` calculates expected bedtime temp under various strategies.
-3. `StrategyEngine.recommend()` selects optimal strategy based on predictions, AQI, and constraints.
-4. Sensor entities update from coordinator data via `_handle_coordinator_update()`.
-5. (Optional) `LearningModule` records predictions for later comparison with actual temps.
+1. Coordinator fetches hourly forecast via `weather.get_forecasts` service.
+2. Wind speed extracted from forecast array: `forecast[0].wind_speed` for current.
+3. Global sensors (outdoor temp, AQI) read from shared config.
+4. Room sensors (indoor temp, device states) read per-instance.
+5. `ThermalModel.predict_temperature()` calculates expected target temp under various strategies.
+6. `StrategyEngine.recommend()` selects optimal strategy based on predictions, AQI, and constraints.
+7. Sensor entities update from coordinator data.
+8. `LearningModule` records predictions for later comparison with actual temps.
 
 ## Adding Features Safely
-1. Identify if new behavior belongs in physics model, strategy engine, or as a new sensor entity.
-2. Add constants in `const.py` (config keys, physics defaults) before using elsewhere.
-3. Extend `config_flow.py` for any new user-configurable options (both ConfigFlow and OptionsFlow).
+1. Determine if feature is global (affects all rooms) or per-room.
+2. Add constants in `const.py` under appropriate section (global vs per-room).
+3. Extend `config_flow.py`: global features in `async_step_global`, room features in room steps.
 4. Physics changes should be testable—add unit tests in `tests/test_thermal_model.py`.
 5. Strategy changes need validation in `tests/test_strategy_engine.py`.
-6. Maintain backward compatibility: don't change physics parameter names without migration.
+6. Maintain backward compatibility: support legacy `CONF_BEDTIME_ENTITY` alongside new `CONF_TARGET_TIME_ENTITY`.
 
 ## Testing & Dev Workflow
 - **Unit tests**: Run `pytest tests/ -v` from repo root with venv active.
 - **Historical replay**: Place Excel/CSV in `data/`, run `python scripts/test_with_historical_data.py data/file.xlsx`.
-- **CI/CD**: GitHub Actions runs lint + tests on push. Deploy to HA Dev via rsync (requires secrets: `HA_DEV_HOST`, `HA_DEV_TOKEN`, `HA_DEV_SSH_KEY`).
+- **CI/CD**: GitHub Actions runs lint + tests on push. Deploy to HA Dev via deploy script.
+- **Deploy**: Run `.\scripts\deploy-smart-cooling.ps1` to copy files and restart HA.
 - **HA mocking**: Tests mock `homeassistant` imports in `conftest.py` to run without HA installation.
 - Enable debug logging:
   ```yaml

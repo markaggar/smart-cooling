@@ -13,47 +13,64 @@ from homeassistant.helpers import selector
 
 from .const import (
     DOMAIN,
-    CONF_INDOOR_TEMP_SENSOR,
-    CONF_OUTDOOR_TEMP_SENSOR,
-    CONF_INDOOR_HUMIDITY_SENSOR,
-    CONF_AQI_SENSOR,
-    CONF_WIND_SPEED_SENSOR,
+    GLOBAL_CONFIG_KEY,
+    # Global config keys
     CONF_WEATHER_ENTITY,
+    CONF_OUTDOOR_TEMP_SENSOR,
+    CONF_AQI_SENSOR,
+    # Room config keys
+    CONF_ROOM_NAME,
+    CONF_INDOOR_TEMP_SENSOR,
+    CONF_INDOOR_HUMIDITY_SENSOR,
     CONF_WINDOW_SENSOR,
     CONF_FAN_SENSOR,
     CONF_AC_SENSOR,
     CONF_TARGET_TEMP_ENTITY,
-    CONF_BEDTIME_ENTITY,
+    CONF_TARGET_TIME_ENTITY,
     CONF_LEARNING_ENABLED,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
+# =============================================================================
+# GLOBAL CONFIGURATION SCHEMA
+# Shared across all room instances - weather, outdoor temp, AQI
+# =============================================================================
+STEP_GLOBAL_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_INDOOR_TEMP_SENSOR): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor"),
+        vol.Required(CONF_WEATHER_ENTITY): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="weather"),
         ),
         vol.Required(CONF_OUTDOOR_TEMP_SENSOR): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor"),
-        ),
-        vol.Optional(CONF_INDOOR_HUMIDITY_SENSOR): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor"),
         ),
         vol.Optional(CONF_AQI_SENSOR): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor"),
         ),
-        vol.Optional(CONF_WIND_SPEED_SENSOR): selector.EntitySelector(
+    }
+)
+
+
+# =============================================================================
+# ROOM CONFIGURATION SCHEMAS
+# Unique per instance - each room has its own physics simulation
+# =============================================================================
+STEP_ROOM_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_ROOM_NAME): selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT),
+        ),
+        vol.Required(CONF_INDOOR_TEMP_SENSOR): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor"),
         ),
-        vol.Optional(CONF_WEATHER_ENTITY): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="weather"),
+        vol.Optional(CONF_INDOOR_HUMIDITY_SENSOR): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor"),
         ),
     }
 )
 
-STEP_DEVICES_DATA_SCHEMA = vol.Schema(
+STEP_ROOM_DEVICES_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_WINDOW_SENSOR): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="binary_sensor"),
@@ -67,12 +84,12 @@ STEP_DEVICES_DATA_SCHEMA = vol.Schema(
     }
 )
 
-STEP_TARGETS_DATA_SCHEMA = vol.Schema(
+STEP_ROOM_TARGETS_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_TARGET_TEMP_ENTITY): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="input_number"),
         ),
-        vol.Optional(CONF_BEDTIME_ENTITY): selector.EntitySelector(
+        vol.Optional(CONF_TARGET_TIME_ENTITY): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="input_datetime"),
         ),
         vol.Optional(CONF_LEARNING_ENABLED, default=True): selector.BooleanSelector(),
@@ -81,37 +98,110 @@ STEP_TARGETS_DATA_SCHEMA = vol.Schema(
 
 
 class SmartCoolingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Smart Cooling."""
+    """Handle a config flow for Smart Cooling.
+    
+    Architecture:
+    - Global config (weather, outdoor temp, AQI) is shared across all rooms
+    - Global config is stored in hass.data[DOMAIN][GLOBAL_CONFIG_KEY]
+    - Each room is a separate config entry with its own sensors and physics
+    - First setup collects global config, subsequent setups reuse it
+    """
 
     VERSION = 1
 
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._data: dict[str, Any] = {}
+        self._global_data: dict[str, Any] = {}
+
+    def _has_global_config(self) -> bool:
+        """Check if global config already exists from another entry."""
+        # Check hass.data for global config
+        if DOMAIN in self.hass.data and GLOBAL_CONFIG_KEY in self.hass.data[DOMAIN]:
+            return True
+        # Check existing entries for any smart_cooling config  
+        entries = self._async_current_entries()
+        return len(entries) > 0
+
+    def _get_global_config(self) -> dict[str, Any]:
+        """Get existing global config from hass.data or first entry."""
+        # Try hass.data first
+        if DOMAIN in self.hass.data and GLOBAL_CONFIG_KEY in self.hass.data[DOMAIN]:
+            return self.hass.data[DOMAIN][GLOBAL_CONFIG_KEY]
+        # Fallback to first existing entry
+        entries = self._async_current_entries()
+        if entries:
+            first_entry = entries[0]
+            return {
+                CONF_WEATHER_ENTITY: first_entry.data.get(CONF_WEATHER_ENTITY),
+                CONF_OUTDOOR_TEMP_SENSOR: first_entry.data.get(CONF_OUTDOOR_TEMP_SENSOR),
+                CONF_AQI_SENSOR: first_entry.data.get(CONF_AQI_SENSOR),
+            }
+        return {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step - sensor selection."""
+        """Handle the initial step - route to global or room config."""
+        if self._has_global_config():
+            # Global config exists, skip to room setup
+            self._global_data = self._get_global_config()
+            return await self.async_step_room()
+        # First setup - collect global config
+        return await self.async_step_global()
+
+    async def async_step_global(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle global configuration - weather, outdoor temp, AQI."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            self._data.update(user_input)
-            return await self.async_step_devices()
+            self._global_data = {
+                CONF_WEATHER_ENTITY: user_input.get(CONF_WEATHER_ENTITY),
+                CONF_OUTDOOR_TEMP_SENSOR: user_input.get(CONF_OUTDOOR_TEMP_SENSOR),
+                CONF_AQI_SENSOR: user_input.get(CONF_AQI_SENSOR),
+            }
+            return await self.async_step_room()
 
         return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            step_id="global",
+            data_schema=STEP_GLOBAL_DATA_SCHEMA,
             errors=errors,
             description_placeholders={
-                "title": "Smart Cooling",
+                "title": "Smart Cooling - Global Settings",
             },
+        )
+
+    async def async_step_room(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle room identification and indoor sensors."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            room_name = user_input.get(CONF_ROOM_NAME, "").strip()
+            
+            # Check for duplicate room names
+            for entry in self._async_current_entries():
+                if entry.data.get(CONF_ROOM_NAME, "").lower() == room_name.lower():
+                    errors[CONF_ROOM_NAME] = "room_already_configured"
+                    break
+            
+            if not errors:
+                self._data.update(user_input)
+                return await self.async_step_devices()
+
+        return self.async_show_form(
+            step_id="room",
+            data_schema=STEP_ROOM_DATA_SCHEMA,
+            errors=errors,
         )
 
     async def async_step_devices(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle device sensor selection."""
+        """Handle room device sensor selection."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -120,28 +210,36 @@ class SmartCoolingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="devices",
-            data_schema=STEP_DEVICES_DATA_SCHEMA,
+            data_schema=STEP_ROOM_DEVICES_SCHEMA,
             errors=errors,
         )
 
     async def async_step_targets(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle target/setpoint configuration."""
+        """Handle target temperature and time configuration."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
             self._data.update(user_input)
             
-            # Create the config entry
+            # Merge global and room config
+            final_data = {**self._global_data, **self._data}
+            room_name = self._data.get(CONF_ROOM_NAME, "Room")
+            
+            # Store global config in hass.data for future instances
+            if DOMAIN not in self.hass.data:
+                self.hass.data[DOMAIN] = {}
+            self.hass.data[DOMAIN][GLOBAL_CONFIG_KEY] = self._global_data
+            
             return self.async_create_entry(
-                title="Smart Cooling",
-                data=self._data,
+                title=f"Smart Cooling - {room_name}",
+                data=final_data,
             )
 
         return self.async_show_form(
             step_id="targets",
-            data_schema=STEP_TARGETS_DATA_SCHEMA,
+            data_schema=STEP_ROOM_TARGETS_SCHEMA,
             errors=errors,
         )
 
@@ -164,14 +262,22 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Manage the options."""
+        """Manage the options - choose global or room settings."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["room_settings", "global_settings"],
+        )
+
+    async def async_step_room_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage room-specific options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        # Merge current data and options
         current = {**self.config_entry.data, **self.config_entry.options}
 
-        options_schema = vol.Schema(
+        room_options_schema = vol.Schema(
             {
                 vol.Optional(
                     CONF_INDOOR_TEMP_SENSOR,
@@ -180,16 +286,40 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
                     selector.EntitySelectorConfig(domain="sensor"),
                 ),
                 vol.Optional(
-                    CONF_OUTDOOR_TEMP_SENSOR,
-                    default=current.get(CONF_OUTDOOR_TEMP_SENSOR, ""),
+                    CONF_INDOOR_HUMIDITY_SENSOR,
+                    default=current.get(CONF_INDOOR_HUMIDITY_SENSOR, ""),
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor"),
                 ),
                 vol.Optional(
-                    CONF_WEATHER_ENTITY,
-                    default=current.get(CONF_WEATHER_ENTITY, ""),
+                    CONF_WINDOW_SENSOR,
+                    default=current.get(CONF_WINDOW_SENSOR, ""),
                 ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="weather"),
+                    selector.EntitySelectorConfig(domain="binary_sensor"),
+                ),
+                vol.Optional(
+                    CONF_FAN_SENSOR,
+                    default=current.get(CONF_FAN_SENSOR, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor"),
+                ),
+                vol.Optional(
+                    CONF_AC_SENSOR,
+                    default=current.get(CONF_AC_SENSOR, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor"),
+                ),
+                vol.Optional(
+                    CONF_TARGET_TEMP_ENTITY,
+                    default=current.get(CONF_TARGET_TEMP_ENTITY, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="input_number"),
+                ),
+                vol.Optional(
+                    CONF_TARGET_TIME_ENTITY,
+                    default=current.get(CONF_TARGET_TIME_ENTITY, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="input_datetime"),
                 ),
                 vol.Optional(
                     CONF_LEARNING_ENABLED,
@@ -199,6 +329,55 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(
-            step_id="init",
-            data_schema=options_schema,
+            step_id="room_settings",
+            data_schema=room_options_schema,
+        )
+
+    async def async_step_global_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage global options - updates all instances."""
+        if user_input is not None:
+            # Update global config in hass.data
+            if DOMAIN in self.hass.data:
+                self.hass.data[DOMAIN][GLOBAL_CONFIG_KEY] = {
+                    CONF_WEATHER_ENTITY: user_input.get(CONF_WEATHER_ENTITY),
+                    CONF_OUTDOOR_TEMP_SENSOR: user_input.get(CONF_OUTDOOR_TEMP_SENSOR),
+                    CONF_AQI_SENSOR: user_input.get(CONF_AQI_SENSOR),
+                }
+            return self.async_create_entry(title="", data=user_input)
+
+        current = {**self.config_entry.data, **self.config_entry.options}
+        
+        # Also check hass.data for global config
+        if DOMAIN in self.hass.data and GLOBAL_CONFIG_KEY in self.hass.data[DOMAIN]:
+            global_config = self.hass.data[DOMAIN][GLOBAL_CONFIG_KEY]
+            current.update(global_config)
+
+        global_options_schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_WEATHER_ENTITY,
+                    default=current.get(CONF_WEATHER_ENTITY, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="weather"),
+                ),
+                vol.Required(
+                    CONF_OUTDOOR_TEMP_SENSOR,
+                    default=current.get(CONF_OUTDOOR_TEMP_SENSOR, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor"),
+                ),
+                vol.Optional(
+                    CONF_AQI_SENSOR,
+                    default=current.get(CONF_AQI_SENSOR, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor"),
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="global_settings",
+            data_schema=global_options_schema,
         )
