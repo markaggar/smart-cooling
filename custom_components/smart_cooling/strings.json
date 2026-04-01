@@ -1,0 +1,50 @@
+{
+    "title": "Smart Cooling",
+    "config": {
+        "step": {
+            "user": {
+                "title": "Configure Temperature Sensors",
+                "description": "Set up the primary sensors for Smart Cooling",
+                "data": {
+                    "indoor_temp_sensor": "Indoor temperature sensor",
+                    "outdoor_temp_sensor": "Outdoor temperature sensor",
+                    "indoor_humidity_sensor": "Indoor humidity sensor (optional)",
+                    "aqi_sensor": "Air quality index sensor (optional)",
+                    "wind_speed_sensor": "Wind speed sensor (optional)",
+                    "weather_entity": "Weather entity for forecasts (optional)"
+                }
+            },
+            "devices": {
+                "title": "Configure Device Sensors",
+                "description": "Set up sensors that track cooling device states",
+                "data": {
+                    "window_sensor": "Window open/closed sensor (optional)",
+                    "fan_sensor": "Window fan on/off sensor (optional)",
+                    "ac_sensor": "AC on/off sensor (optional)"
+                }
+            },
+            "targets": {
+                "title": "Configure Targets",
+                "description": "Set up target temperature and bedtime",
+                "data": {
+                    "target_temp_entity": "Target temperature input_number (optional)",
+                    "bedtime_entity": "Bedtime input_datetime (optional)",
+                    "learning_enabled": "Enable learning from predictions"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Smart Cooling Options",
+                "data": {
+                    "indoor_temp_sensor": "Indoor temperature sensor",
+                    "outdoor_temp_sensor": "Outdoor temperature sensor",
+                    "weather_entity": "Weather entity for forecasts",
+                    "learning_enabled": "Enable learning from predictions"
+                }
+            }
+        }
+    }
+}

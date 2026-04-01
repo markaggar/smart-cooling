@@ -1,0 +1,16 @@
+# Development dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+pytest-homeassistant-custom-component>=0.13.0
+
+# Linting/typing
+ruff>=0.1.0
+mypy>=1.7.0
+
+# Historical data processing
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Home Assistant (for type hints)
+homeassistant>=2024.1.0
