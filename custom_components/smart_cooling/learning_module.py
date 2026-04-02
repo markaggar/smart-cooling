@@ -24,6 +24,8 @@ class PredictionRecord:
     actual_temp: float | None
     conditions: dict[str, Any]
     params_used: dict[str, float]
+    # ISO datetime of the target time this prediction was made for (e.g. bedtime)
+    target_datetime: str | None = None
     
     def prediction_error(self) -> float | None:
         """Calculate error if actual is known."""
@@ -146,8 +148,22 @@ class LearningModule:
         timestamp: datetime,
         conditions: dict[str, Any],
         prediction: Any,  # TemperaturePrediction
+        target_datetime: datetime | None = None,
     ) -> None:
-        """Record a prediction for later comparison with actual."""
+        """Record a prediction for later comparison with actual.
+        
+        target_datetime is the time by which the room should reach target temp.
+        Only one record is kept per target_datetime to avoid flooding pending list.
+        """
+        # Deduplicate: if we already have a pending prediction for this target time,
+        # replace it with the more recent one (better current conditions data).
+        target_dt_str = target_datetime.isoformat() if target_datetime else None
+        if target_dt_str:
+            self._pending_predictions = [
+                r for r in self._pending_predictions
+                if r.target_datetime != target_dt_str
+            ]
+
         # Get the parameters that were used for this prediction
         params_used = dict(DEFAULT_PHYSICS_PARAMS)
         params_used.update(self._learned_params)
@@ -165,6 +181,7 @@ class LearningModule:
             actual_temp=None,  # Will be filled in later
             conditions=serializable_conditions,
             params_used=params_used,
+            target_datetime=target_dt_str,
         )
         
         self._pending_predictions.append(record)
@@ -175,33 +192,56 @@ class LearningModule:
     async def record_actual(
         self, timestamp: datetime, actual_temp: float
     ) -> None:
-        """Record actual temperature and match with predictions."""
+        """Record actual temperature and match with predictions.
+        
+        Matches pending predictions whose target_datetime is close to timestamp.
+        """
         matched = False
         
-        # Find prediction(s) close to this timestamp
         for record in self._pending_predictions:
-            record_time = datetime.fromisoformat(record.timestamp)
-            time_diff = abs((timestamp - record_time).total_seconds())
-            
-            # Match if within 30 minutes of prediction
+            if record.target_datetime is None:
+                continue
+            try:
+                target_dt = datetime.fromisoformat(record.target_datetime)
+            except ValueError:
+                continue
+            # Match if the target time is within 30 minutes of the measured actual
+            time_diff = abs((timestamp - target_dt).total_seconds())
             if time_diff < 1800:
                 record.actual_temp = actual_temp
                 self._historical_records.append(record)
                 matched = True
                 _LOGGER.debug(
-                    "Matched actual %.1f°F with prediction %.1f°F (error: %.1f°F)",
+                    "Matched actual %.1f°F with prediction %.1f°F (error: %.1f°F) "
+                    "[predicted at %s for target %s]",
                     actual_temp,
                     record.predicted_temp,
-                    actual_temp - record.predicted_temp,
+                    record.timestamp,
+                    record.target_datetime,
                 )
         
         if matched:
-            # Remove matched records from pending
             self._pending_predictions = [
                 r for r in self._pending_predictions
                 if r.actual_temp is None
             ]
             self._save_state()
+
+    async def try_complete_predictions(
+        self, current_time: datetime, current_indoor_temp: float
+    ) -> None:
+        """Called every update cycle to check if any predictions' target time has passed.
+        
+        When target_datetime <= now, we can record the actual indoor temperature
+        and mark that prediction complete for learning.
+        """
+        overdue = [
+            r for r in self._pending_predictions
+            if r.target_datetime is not None
+            and datetime.fromisoformat(r.target_datetime) <= current_time
+        ]
+        if overdue:
+            await self.record_actual(current_time, current_indoor_temp)
 
     async def compute_parameter_updates(self) -> dict[str, float] | None:
         """Analyze errors and compute parameter adjustments.

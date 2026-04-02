@@ -29,6 +29,23 @@ SERVICE_CALIBRATE_SCHEMA = vol.Schema(
     }
 )
 
+SERVICE_SET_PARAMS = "set_params"
+_POSITIVE_FLOAT = vol.All(vol.Coerce(float), vol.Range(min=0.0))
+SERVICE_SET_PARAMS_SCHEMA = vol.Schema(
+    {
+        vol.Required("entry_id"): cv.string,
+        # Accept any subset of the physics params; unknown keys are rejected
+        vol.Optional("base_heat_gain_rate"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=10.0)),
+        vol.Optional("thermal_transfer_coefficient"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
+        vol.Optional("solar_gain_factor"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=5.0)),
+        vol.Optional("ac_cooling_rate_mild"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20.0)),
+        vol.Optional("ac_cooling_rate_hot"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20.0)),
+        vol.Optional("fan_cooling_effectiveness"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
+        vol.Optional("natural_cooling_effectiveness"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0)),
+        vol.Optional("fan_equivalent_wind_speed"): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=30.0)),
+    }
+)
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Smart Cooling integration."""
@@ -50,6 +67,32 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_CALIBRATE,
         handle_calibrate,
         schema=SERVICE_CALIBRATE_SCHEMA,
+    )
+
+    async def handle_set_params(call: ServiceCall) -> None:
+        """Manually override one or more physics parameters for a room."""
+        entry_id = call.data["entry_id"]
+        coordinator: SmartCoolingCoordinator | None = hass.data[DOMAIN].get(entry_id)
+        if coordinator is None:
+            _LOGGER.error("set_params: no coordinator found for entry_id=%s", entry_id)
+            return
+        params = {k: v for k, v in call.data.items() if k != "entry_id"}
+        if not params:
+            _LOGGER.warning("set_params: no parameters provided")
+            return
+        coordinator.thermal_model.update_params(params)
+        await coordinator.learning_module.save_params(params)
+        _LOGGER.info(
+            "set_params: applied manual overrides for %s: %s",
+            coordinator.room_name,
+            params,
+        )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_PARAMS,
+        handle_set_params,
+        schema=SERVICE_SET_PARAMS_SCHEMA,
     )
     return True
 

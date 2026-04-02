@@ -190,6 +190,19 @@ class ThermalModel:
                 )
             elif cooling_strategy == "ac":
                 cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
+            elif cooling_strategy == "natural":
+                # Natural ventilation (open window, no fan) — driven by
+                # temperature differential and wind, but less effective than a fan
+                temp_diff = simulated_temp - hour_outdoor_temp
+                if temp_diff > 0:
+                    wind_data = self._get_forecast_for_hour(forecast, future_time)
+                    hour_wind = wind_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
+                    wind_factor = max(float(hour_wind), 1.0) / 10.0
+                    cooling = (
+                        temp_diff
+                        * self.params["natural_cooling_effectiveness"]
+                        * wind_factor
+                    )
             
             # Net temperature change
             net_change = heat_gain - cooling
@@ -275,8 +288,17 @@ class ThermalModel:
                 cooling = self.calculate_fan_cooling_rate(hour_outdoor_temp, simulated_temp)
             elif cooling_strategy == "ac":
                 cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
-
-            simulated_temp += (heat_gain - cooling) * step_hours
+            elif cooling_strategy == "natural":
+                temp_diff = simulated_temp - hour_outdoor_temp
+                if temp_diff > 0:
+                    wind_data = self._get_forecast_for_hour(forecast, future_time)
+                    hour_wind = wind_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
+                    wind_factor = max(float(hour_wind), 1.0) / 10.0
+                    cooling = (
+                        temp_diff
+                        * self.params["natural_cooling_effectiveness"]
+                        * wind_factor
+                    )
 
             if simulated_temp <= target_temp:
                 # Interpolate back to precise crossing point
@@ -287,19 +309,20 @@ class ThermalModel:
     def _get_forecast_for_hour(
         self, forecast: list[dict], target_time: datetime
     ) -> dict[str, Any]:
-        """Extract forecast data for a specific hour."""
+        """Extract forecast data for the hour closest to target_time."""
         if not forecast:
             return {}
-        
+
+        best_entry = None
+        best_delta = float("inf")
+
         for entry in forecast:
-            # Handle various datetime formats from HA weather integrations
             entry_time = entry.get("datetime")
             if entry_time is None:
                 continue
-                
+
             if isinstance(entry_time, str):
                 try:
-                    # ISO format
                     if "T" in entry_time:
                         entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
                     else:
@@ -310,15 +333,29 @@ class ThermalModel:
                 entry_dt = entry_time
             else:
                 continue
-            
-            # Check if this forecast entry is close to our target hour
-            if abs((entry_dt - target_time).total_seconds()) < 3600:
-                return {
-                    "temperature": entry.get("temperature", 70.0),
-                    "humidity": entry.get("humidity", 50.0),
-                    "cloud_coverage": entry.get("cloud_coverage", 50.0),
-                    "wind_speed": entry.get("wind_speed", 5.0),
-                    "uv_index": entry.get("uv_index", 0.0),
-                }
-        
+
+            # Make both tz-aware or both tz-naive for comparison
+            try:
+                if entry_dt.tzinfo is None and target_time.tzinfo is not None:
+                    entry_dt = entry_dt.replace(tzinfo=target_time.tzinfo)
+                elif entry_dt.tzinfo is not None and target_time.tzinfo is None:
+                    entry_dt = entry_dt.replace(tzinfo=None)
+            except AttributeError:
+                pass
+
+            delta = abs((entry_dt - target_time).total_seconds())
+            if delta < best_delta:
+                best_delta = delta
+                best_entry = entry
+
+        # Only use forecast data if it's within 2 hours of target (don't extrapolate far)
+        if best_entry is not None and best_delta < 7200:
+            return {
+                "temperature": best_entry.get("temperature", 70.0),
+                "humidity": best_entry.get("humidity", 50.0),
+                "cloud_coverage": best_entry.get("cloud_coverage", 50.0),
+                "wind_speed": best_entry.get("wind_speed", 5.0),
+                "uv_index": best_entry.get("uv_index", 0.0),
+            }
+
         return {}

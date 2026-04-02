@@ -1,3 +1,89 @@
+set_params:
+  name: Set physics parameters
+  description: >
+    Manually override one or more thermal model parameters for a room.
+    Changes take effect immediately and are persisted — they survive restarts
+    and are used as the base for future learning/calibration.
+    Omit any parameter you don't want to change.
+  fields:
+    entry_id:
+      name: Config entry ID
+      description: The config entry ID for the room. Found in the URL when clicking the integration in Settings → Devices & Services.
+      required: true
+      example: "abc123def456"
+      selector:
+        text:
+    base_heat_gain_rate:
+      name: Base heat gain rate (°F/hr)
+      description: Passive heat gain when no sun and outdoor temp equals indoor temp. Default 2.2. Raise if room heats faster than predicted; lower if predictions run too hot.
+      required: false
+      selector:
+        number:
+          min: 0.0
+          max: 10.0
+          step: 0.1
+          unit_of_measurement: "°F/hr"
+    thermal_transfer_coefficient:
+      name: Thermal transfer coefficient
+      description: >
+        How quickly the outdoor-indoor temperature difference drives heat through
+        walls. Default 0.1 means a 10°F outdoor/indoor gap adds 1.0°F/hr.
+        Increase for poorly insulated rooms; decrease for well-insulated ones.
+        Typical range: 0.05 (very well insulated) to 0.3 (poorly insulated).
+      required: false
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.01
+    solar_gain_factor:
+      name: Solar gain factor
+      description: Multiplier for solar/UV heat gain during peak hours (noon–6pm). Default 0.6. Raise for south/west-facing rooms with lots of windows.
+      required: false
+      selector:
+        number:
+          min: 0.0
+          max: 5.0
+          step: 0.05
+    ac_cooling_rate_mild:
+      name: AC cooling rate — mild weather (°F/hr)
+      description: How fast AC cools the room when outdoor temp is below 82°F. Default 4.5.
+      required: false
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          step: 0.1
+          unit_of_measurement: "°F/hr"
+    ac_cooling_rate_hot:
+      name: AC cooling rate — hot weather (°F/hr)
+      description: How fast AC cools the room when outdoor temp is 82°F or above (AC is less efficient). Default 2.5.
+      required: false
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          step: 0.1
+          unit_of_measurement: "°F/hr"
+    fan_cooling_effectiveness:
+      name: Fan cooling effectiveness
+      description: Coefficient for fan-assisted cooling. Default 0.15. Raise if fan is more effective than predicted.
+      required: false
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.01
+    natural_cooling_effectiveness:
+      name: Natural ventilation effectiveness
+      description: Coefficient for open-window passive airflow (no fan). Default 0.05.
+      required: false
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.01
+
 calibrate:
   name: Calibrate from history
   description: >

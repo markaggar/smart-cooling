@@ -272,11 +272,19 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Can't reach target — action needed immediately
                 action_needed_by = now
             
-            # Record for learning (actual outcome will be recorded later)
+            # Check if any earlier predictions' target time has now passed and
+            # record the actual indoor temp so the learning module can score them.
+            await self.learning_module.try_complete_predictions(
+                current_time=now,
+                current_indoor_temp=current_conditions["indoor_temp"],
+            )
+
+            # Record this prediction for future comparison (deduplicated per target_datetime)
             self.learning_module.record_prediction(
-                timestamp=dt_util.now(),
+                timestamp=now,
                 conditions=current_conditions,
                 prediction=prediction,
+                target_datetime=target_datetime,
             )
             
             return {
@@ -381,23 +389,28 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if len(timeline) < 10:
             return {"error": f"Only {len(timeline)} usable samples — need at least 10"}
 
-        # Measure observed heat-gain and cooling rates from consecutive pairs
-        heat_gain_obs: list[float] = []
         fan_cool_obs: list[float] = []
         ac_cool_obs: list[float] = []
+
+        # Passive samples: outdoor < indoor, no AC, no fan
+        # observed_rate = base_heat_gain + (outdoor - indoor) * thermal_transfer_coeff
+        # This is a linear regression: y = a + b*x
+        #   y = observed rate
+        #   x = (outdoor - indoor)   [negative values when outdoor is cooler]
+        #   a = base_heat_gain_rate
+        #   b = thermal_transfer_coefficient
+        passive_obs: list[tuple[float, float]] = []  # (x, y)
 
         for i in range(1, len(timeline)):
             prev = timeline[i - 1]
             curr = timeline[i]
             dt_h = (curr["ts"] - prev["ts"]).total_seconds() / 3600
-            if dt_h <= 0 or dt_h > 1:  # skip gaps > 1 hour
+            if dt_h <= 0 or dt_h > 1:
                 continue
             delta_temp = curr["indoor_temp"] - prev["indoor_temp"]
             rate = delta_temp / dt_h  # °F/hr
 
             if prev["ac_running"]:
-                # Net rate = heat_gain - ac_cooling  →  ac_cooling = heat_gain - rate
-                # Use model heat gain as baseline
                 predicted_gain = self.thermal_model.calculate_heat_gain(
                     hour=prev["ts"].hour,
                     outdoor_temp=prev["outdoor_temp"],
@@ -411,19 +424,47 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     indoor_temp=prev["indoor_temp"],
                 )
                 fan_cool_obs.append(max(0.0, predicted_gain - rate))
-            elif prev["outdoor_temp"] < prev["indoor_temp"]:
-                # Natural passive case: observed rate ≈ heat gain
-                heat_gain_obs.append(rate)
+            else:
+                # All passive samples (outdoor may be hotter OR cooler)
+                x = prev["outdoor_temp"] - prev["indoor_temp"]
+                passive_obs.append((x, rate))
 
         updated_params: dict[str, float] = {}
         old_params = dict(self.thermal_model.params)
 
-        if len(heat_gain_obs) >= 5:
-            observed_base = sum(heat_gain_obs) / len(heat_gain_obs)
-            # Smooth toward observed value with 50% weight
-            updated_params["base_heat_gain_rate"] = round(
-                0.5 * self.thermal_model.params["base_heat_gain_rate"] + 0.5 * observed_base, 3
-            )
+        # Least-squares regression on passive samples to estimate both
+        # base_heat_gain_rate (intercept) and thermal_transfer_coefficient (slope).
+        # Requires variance in (outdoor - indoor) to separate the two terms.
+        if len(passive_obs) >= 10:
+            n = len(passive_obs)
+            sum_x = sum(p[0] for p in passive_obs)
+            sum_y = sum(p[1] for p in passive_obs)
+            sum_xx = sum(p[0] ** 2 for p in passive_obs)
+            sum_xy = sum(p[0] * p[1] for p in passive_obs)
+            denom = n * sum_xx - sum_x ** 2
+
+            if abs(denom) > 1e-6:  # enough variance in x to solve
+                slope = (n * sum_xy - sum_x * sum_y) / denom   # thermal_transfer_coeff
+                intercept = (sum_y - slope * sum_x) / n         # base_heat_gain_rate
+
+                # Sanity-clamp before accepting
+                slope = max(0.01, min(0.5, slope))
+                intercept = max(0.1, min(6.0, intercept))
+
+                # Smooth 50/50 toward observed values
+                updated_params["thermal_transfer_coefficient"] = round(
+                    0.5 * self.thermal_model.params["thermal_transfer_coefficient"]
+                    + 0.5 * slope, 4
+                )
+                updated_params["base_heat_gain_rate"] = round(
+                    0.5 * self.thermal_model.params["base_heat_gain_rate"]
+                    + 0.5 * intercept, 3
+                )
+                _LOGGER.info(
+                    "Regression on %d passive samples: base_gain=%.3f, "
+                    "thermal_transfer=%.4f",
+                    n, intercept, slope,
+                )
 
         if len(ac_cool_obs) >= 5:
             observed_ac = sum(ac_cool_obs) / len(ac_cool_obs)
@@ -451,7 +492,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return {
             "samples_used": len(timeline),
-            "heat_gain_samples": len(heat_gain_obs),
+            "passive_samples": len(passive_obs),
             "fan_cool_samples": len(fan_cool_obs),
             "ac_cool_samples": len(ac_cool_obs),
             "params_before": old_params,
