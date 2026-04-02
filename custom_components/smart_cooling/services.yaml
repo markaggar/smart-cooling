@@ -1,0 +1,28 @@
+calibrate:
+  name: Calibrate from history
+  description: >
+    Load the last N days of sensor history directly from the Home Assistant
+    recorder and use it to tune this room's thermal model parameters.
+    No CSV export required — the integration reads your existing sensor history.
+    Results and any parameter changes are logged at the INFO level.
+  fields:
+    entry_id:
+      name: Config entry ID
+      description: >
+        The config entry ID for the room to calibrate. Find it in
+        Settings → Devices & Services → Smart Cooling → (room) → entry ID
+        shown in the URL when you click the integration.
+      required: true
+      example: "abc123def456"
+      selector:
+        text:
+    days:
+      name: Days of history
+      description: How many days of past data to load (1–365, default 30).
+      required: false
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days

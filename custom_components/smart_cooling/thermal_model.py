@@ -227,6 +227,63 @@ class ThermalModel:
             ),
         )
 
+    def find_hours_to_cool_to_target(
+        self,
+        current_conditions: dict[str, Any],
+        cooling_strategy: str,
+        max_hours: float = 24.0,
+    ) -> float | None:
+        """Find how many hours until indoor temp reaches target with given strategy.
+
+        Simulates forward in 15-minute steps until crossing target or max_hours.
+        Returns fractional hours, or None if target not reachable within max_hours.
+        """
+        indoor_temp = current_conditions.get("indoor_temp", 72.0)
+        outdoor_temp = current_conditions.get("outdoor_temp", 70.0)
+        target_temp = current_conditions.get("target_temp", 72.0)
+        forecast = current_conditions.get("forecast", [])
+        current_time: datetime = current_conditions.get("current_time", datetime.now())
+
+        # Already at or below target
+        if indoor_temp <= target_temp:
+            return 0.0
+
+        step_hours = 0.25  # 15-minute resolution
+        steps = int(max_hours / step_hours)
+        simulated_temp = indoor_temp
+
+        for i in range(steps):
+            elapsed_hours = i * step_hours
+            future_time = current_time + timedelta(hours=elapsed_hours)
+            hour = future_time.hour
+
+            forecast_data = self._get_forecast_for_hour(forecast, future_time)
+            hour_outdoor_temp = forecast_data.get("temperature", outdoor_temp)
+            cloud_coverage = forecast_data.get("cloud_coverage", 50.0)
+            uv_index = forecast_data.get("uv_index", 0.0)
+
+            heat_gain = self.calculate_heat_gain(
+                hour=hour,
+                outdoor_temp=hour_outdoor_temp,
+                indoor_temp=simulated_temp,
+                cloud_coverage=cloud_coverage,
+                uv_index=uv_index,
+            )
+
+            cooling = 0.0
+            if cooling_strategy == "fan":
+                cooling = self.calculate_fan_cooling_rate(hour_outdoor_temp, simulated_temp)
+            elif cooling_strategy == "ac":
+                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
+
+            simulated_temp += (heat_gain - cooling) * step_hours
+
+            if simulated_temp <= target_temp:
+                # Interpolate back to precise crossing point
+                return round(elapsed_hours, 2)
+
+        return None  # Not reachable within max_hours
+
     def _get_forecast_for_hour(
         self, forecast: list[dict], target_time: datetime
     ) -> dict[str, Any]:

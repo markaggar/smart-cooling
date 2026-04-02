@@ -28,6 +28,8 @@ from .const import (
     CONF_TARGET_TEMP_ENTITY,
     CONF_TARGET_TIME_ENTITY,
     CONF_LEARNING_ENABLED,
+    CONF_TOLERANCE_MINUTES,
+    DEFAULT_TOLERANCE_MINUTES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -91,6 +93,11 @@ STEP_ROOM_TARGETS_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_TARGET_TIME_ENTITY): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="input_datetime"),
+        ),
+        vol.Optional(
+            CONF_TOLERANCE_MINUTES, default=DEFAULT_TOLERANCE_MINUTES
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=120, step=5, unit_of_measurement="min"),
         ),
         vol.Optional(CONF_LEARNING_ENABLED, default=True): selector.BooleanSelector(),
     }
@@ -249,15 +256,11 @@ class SmartCoolingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return SmartCoolingOptionsFlow(config_entry)
+        return SmartCoolingOptionsFlow()
 
 
 class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for Smart Cooling."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -265,7 +268,10 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
         """Manage the options - choose global or room settings."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["room_settings", "global_settings"],
+            menu_options={
+                "room_settings": "Room Settings",
+                "global_settings": "Global Settings (affects all rooms)",
+            },
         )
 
     async def async_step_room_settings(
@@ -277,60 +283,68 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
 
         current = {**self.config_entry.data, **self.config_entry.options}
 
-        room_options_schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_INDOOR_TEMP_SENSOR,
-                    default=current.get(CONF_INDOOR_TEMP_SENSOR, ""),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor"),
-                ),
-                vol.Optional(
-                    CONF_INDOOR_HUMIDITY_SENSOR,
-                    default=current.get(CONF_INDOOR_HUMIDITY_SENSOR, ""),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor"),
-                ),
-                vol.Optional(
-                    CONF_WINDOW_SENSOR,
-                    default=current.get(CONF_WINDOW_SENSOR, ""),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="binary_sensor"),
-                ),
-                vol.Optional(
-                    CONF_FAN_SENSOR,
-                    default=current.get(CONF_FAN_SENSOR, ""),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="binary_sensor"),
-                ),
-                vol.Optional(
-                    CONF_AC_SENSOR,
-                    default=current.get(CONF_AC_SENSOR, ""),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="binary_sensor"),
-                ),
-                vol.Optional(
-                    CONF_TARGET_TEMP_ENTITY,
-                    default=current.get(CONF_TARGET_TEMP_ENTITY, ""),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="input_number"),
-                ),
-                vol.Optional(
-                    CONF_TARGET_TIME_ENTITY,
-                    default=current.get(CONF_TARGET_TIME_ENTITY, ""),
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="input_datetime"),
-                ),
-                vol.Optional(
-                    CONF_LEARNING_ENABLED,
-                    default=current.get(CONF_LEARNING_ENABLED, True),
-                ): selector.BooleanSelector(),
-            }
+        # Build schema with suggested values (not defaults) for optional entity fields
+        schema_dict = {}
+        
+        # Required field with default
+        schema_dict[vol.Optional(
+            CONF_INDOOR_TEMP_SENSOR,
+            description={"suggested_value": current.get(CONF_INDOOR_TEMP_SENSOR)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor"),
         )
+        
+        # Optional fields with suggested values
+        schema_dict[vol.Optional(
+            CONF_INDOOR_HUMIDITY_SENSOR,
+            description={"suggested_value": current.get(CONF_INDOOR_HUMIDITY_SENSOR)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor"),
+        )
+        schema_dict[vol.Optional(
+            CONF_WINDOW_SENSOR,
+            description={"suggested_value": current.get(CONF_WINDOW_SENSOR)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="binary_sensor"),
+        )
+        schema_dict[vol.Optional(
+            CONF_FAN_SENSOR,
+            description={"suggested_value": current.get(CONF_FAN_SENSOR)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="binary_sensor"),
+        )
+        schema_dict[vol.Optional(
+            CONF_AC_SENSOR,
+            description={"suggested_value": current.get(CONF_AC_SENSOR)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="binary_sensor"),
+        )
+        schema_dict[vol.Optional(
+            CONF_TARGET_TEMP_ENTITY,
+            description={"suggested_value": current.get(CONF_TARGET_TEMP_ENTITY)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="input_number"),
+        )
+        schema_dict[vol.Optional(
+            CONF_TARGET_TIME_ENTITY,
+            description={"suggested_value": current.get(CONF_TARGET_TIME_ENTITY)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="input_datetime"),
+        )
+        schema_dict[vol.Optional(
+            CONF_TOLERANCE_MINUTES,
+            default=current.get(CONF_TOLERANCE_MINUTES, DEFAULT_TOLERANCE_MINUTES),
+        )] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=120, step=5, unit_of_measurement="min"),
+        )
+        schema_dict[vol.Optional(
+            CONF_LEARNING_ENABLED,
+            default=current.get(CONF_LEARNING_ENABLED, True),
+        )] = selector.BooleanSelector()
 
         return self.async_show_form(
             step_id="room_settings",
-            data_schema=room_options_schema,
+            data_schema=vol.Schema(schema_dict),
         )
 
     async def async_step_global_settings(
@@ -358,19 +372,19 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
             {
                 vol.Required(
                     CONF_WEATHER_ENTITY,
-                    default=current.get(CONF_WEATHER_ENTITY, ""),
+                    description={"suggested_value": current.get(CONF_WEATHER_ENTITY)},
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="weather"),
                 ),
                 vol.Required(
                     CONF_OUTDOOR_TEMP_SENSOR,
-                    default=current.get(CONF_OUTDOOR_TEMP_SENSOR, ""),
+                    description={"suggested_value": current.get(CONF_OUTDOOR_TEMP_SENSOR)},
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor"),
                 ),
                 vol.Optional(
                     CONF_AQI_SENSOR,
-                    default=current.get(CONF_AQI_SENSOR, ""),
+                    description={"suggested_value": current.get(CONF_AQI_SENSOR)},
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor"),
                 ),

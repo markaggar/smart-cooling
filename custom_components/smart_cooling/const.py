@@ -95,6 +95,11 @@ CONF_LEARNING_ENABLED: Final = "learning_enabled"
 CONF_LEARNING_RATE: Final = "learning_rate"
 DEFAULT_LEARNING_RATE: Final = 0.1
 
+# Tolerance in minutes beyond target time that is still acceptable
+# e.g. 30 means: if fan reaches target by target_time+30min, prefer fan over AC
+CONF_TOLERANCE_MINUTES: Final = "tolerance_minutes"
+DEFAULT_TOLERANCE_MINUTES: Final = 30
+
 # =============================================================================
 # UPDATE INTERVAL
 # =============================================================================
@@ -109,6 +114,9 @@ SENSOR_COOLING_DEFICIT: Final = "cooling_deficit"
 SENSOR_CONFIDENCE: Final = "prediction_confidence"
 SENSOR_CURRENT_STRATEGY: Final = "current_strategy"
 SENSOR_TIME_TO_TARGET: Final = "time_to_target"
+SENSOR_WILL_REACH_TARGET_AT: Final = "will_reach_target_at"
+SENSOR_ACTION_NEEDED_BY: Final = "action_needed_by"
+SENSOR_REASONING: Final = "reasoning"
 
 # Legacy alias
 SENSOR_PREDICTED_BEDTIME_TEMP: Final = SENSOR_PREDICTED_TARGET_TEMP

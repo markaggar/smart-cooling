@@ -103,6 +103,11 @@ class LearningModule:
         except OSError as err:
             _LOGGER.error("Failed to save history: %s", err)
 
+    async def save_params(self, params: dict[str, float]) -> None:
+        """Merge new params into learned params and persist."""
+        self._learned_params.update(params)
+        await self.hass.async_add_executor_job(self._save_state)
+
     def get_learned_params(self) -> dict[str, float]:
         """Get current learned parameters."""
         return dict(self._learned_params)

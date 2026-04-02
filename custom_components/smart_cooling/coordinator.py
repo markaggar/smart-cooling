@@ -8,6 +8,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -27,6 +28,8 @@ from .const import (
     CONF_TARGET_TEMP_ENTITY,
     CONF_TARGET_TIME_ENTITY,
     CONF_BEDTIME_ENTITY,  # Legacy support
+    CONF_TOLERANCE_MINUTES,
+    DEFAULT_TOLERANCE_MINUTES,
 )
 from .thermal_model import ThermalModel
 from .strategy_engine import StrategyEngine
@@ -212,7 +215,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ac_running": self._get_binary_state(
                     self.config.get(CONF_AC_SENSOR)
                 ),
-                "current_time": datetime.now(),
+                "current_time": dt_util.now(),
                 "forecast": forecast,
             }
             
@@ -225,15 +228,53 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hours_ahead=hours_to_target,
             )
             
-            # Get strategy recommendation
+            # Get strategy recommendation (tolerance-aware)
+            tolerance_minutes = int(
+                self.config.get(CONF_TOLERANCE_MINUTES, DEFAULT_TOLERANCE_MINUTES)
+            )
             strategy = self.strategy_engine.recommend(
                 current_conditions=current_conditions,
                 prediction=prediction,
+                tolerance_minutes=tolerance_minutes,
+)
+
+            # Estimate time to reach target with the recommended cooling method
+            cooling_method = strategy.method.value  # e.g. "start_fan", "start_ac", etc.
+            if "fan" in cooling_method:
+                active_strategy = "fan"
+            elif "ac" in cooling_method:
+                active_strategy = "ac"
+            else:
+                active_strategy = "natural"
+
+            hours_until_cool = self.thermal_model.find_hours_to_cool_to_target(
+                current_conditions=current_conditions,
+                cooling_strategy=active_strategy,
             )
+
+            now = dt_util.now()
+
+            # Datetime when room will reach target (None = won't reach in 24h)
+            will_reach_target_at = (
+                now + timedelta(hours=hours_until_cool)
+                if hours_until_cool is not None
+                else None
+            )
+
+            # Latest time to START cooling so target is reached by target_time + tolerance
+            tolerance_hours = tolerance_minutes / 60.0
+            target_datetime = now + timedelta(hours=hours_to_target)
+            if hours_until_cool is not None:
+                # You can delay starting by (budget - time_it_takes)
+                delay_budget = hours_to_target + tolerance_hours - hours_until_cool
+                action_needed_by = now + timedelta(hours=max(0.0, delay_budget))
+            else:
+                # Can't reach target — action needed immediately
+                action_needed_by = now
             
             # Record for learning (actual outcome will be recorded later)
             self.learning_module.record_prediction(
-                timestamp=datetime.now(),
+                timestamp=dt_util.now(),
                 conditions=current_conditions,
                 prediction=prediction,
             )
@@ -246,6 +287,9 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "learned_params": self.thermal_model.params,
                 "prediction_confidence": self.learning_module.get_confidence(),
                 "hours_to_target": hours_to_target,
+                "hours_until_cool": hours_until_cool,
+                "will_reach_target_at": will_reach_target_at,
+                "action_needed_by": action_needed_by,
             }
             
         except Exception as err:
@@ -255,7 +299,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Calculate hours until target time."""
         try:
             target_time = datetime.strptime(target_time_str, "%H:%M:%S").time()
-            now = datetime.now()
+            now = dt_util.now()
             target_today = now.replace(
                 hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0
             )
@@ -264,6 +308,156 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return (target_today - now).total_seconds() / 3600
         except ValueError:
             return 8.0  # Default 8 hours
+
+    async def async_calibrate_from_history(self, days: int = 30) -> dict[str, Any]:
+        """Pull history from HA recorder and tune physics parameters.
+
+        Uses the configured indoor/outdoor temp sensors and AC/fan state sensors
+        to replay real observed temperature changes against the thermal model,
+        then adjusts heat-gain and cooling-rate parameters to minimise error.
+
+        Returns a summary dict with before/after params and error stats.
+        """
+        from datetime import timezone
+        from homeassistant.components import recorder
+        from homeassistant.components.recorder.history import get_significant_states
+
+        indoor_entity = self.config.get(CONF_INDOOR_TEMP_SENSOR)
+        outdoor_entity = self.config.get(CONF_OUTDOOR_TEMP_SENSOR)
+        ac_entity = self.config.get(CONF_AC_SENSOR)
+        fan_entity = self.config.get(CONF_FAN_SENSOR)
+
+        if not indoor_entity or not outdoor_entity:
+            return {"error": "indoor_temp_sensor and outdoor_temp_sensor must be configured"}
+
+        end_time = dt_util.now()
+        start_time = end_time - timedelta(days=days)
+
+        entity_ids = [e for e in [indoor_entity, outdoor_entity, ac_entity, fan_entity] if e]
+
+        # Fetch history from recorder (runs in executor thread)
+        rec_instance = recorder.get_instance(self.hass)
+        history = await rec_instance.async_add_executor_job(
+            get_significant_states,
+            self.hass,
+            start_time,
+            end_time,
+            entity_ids,
+        )
+
+        # Build timeline of merged samples (one per ~15 min bucket)
+        samples: dict[datetime, dict[str, Any]] = {}
+
+        for entity_id, states in history.items():
+            for state in states:
+                if state.state in ("unknown", "unavailable"):
+                    continue
+                # Bucket to nearest 15 min
+                ts = state.last_changed.replace(second=0, microsecond=0)
+                bucket = ts.replace(minute=(ts.minute // 15) * 15, tzinfo=None)
+                if bucket not in samples:
+                    samples[bucket] = {}
+                try:
+                    if entity_id == indoor_entity:
+                        samples[bucket]["indoor_temp"] = float(state.state)
+                    elif entity_id == outdoor_entity:
+                        samples[bucket]["outdoor_temp"] = float(state.state)
+                    elif entity_id == ac_entity:
+                        samples[bucket]["ac_running"] = state.state == "on"
+                    elif entity_id == fan_entity:
+                        samples[bucket]["fan_running"] = state.state == "on"
+                except (ValueError, TypeError):
+                    continue
+
+        # Sort and forward-fill missing sensors
+        sorted_times = sorted(samples)
+        last = {"indoor_temp": None, "outdoor_temp": None, "ac_running": False, "fan_running": False}
+        timeline = []
+        for ts in sorted_times:
+            last.update(samples[ts])
+            if last["indoor_temp"] is not None and last["outdoor_temp"] is not None:
+                timeline.append({"ts": ts, **last})
+
+        if len(timeline) < 10:
+            return {"error": f"Only {len(timeline)} usable samples — need at least 10"}
+
+        # Measure observed heat-gain and cooling rates from consecutive pairs
+        heat_gain_obs: list[float] = []
+        fan_cool_obs: list[float] = []
+        ac_cool_obs: list[float] = []
+
+        for i in range(1, len(timeline)):
+            prev = timeline[i - 1]
+            curr = timeline[i]
+            dt_h = (curr["ts"] - prev["ts"]).total_seconds() / 3600
+            if dt_h <= 0 or dt_h > 1:  # skip gaps > 1 hour
+                continue
+            delta_temp = curr["indoor_temp"] - prev["indoor_temp"]
+            rate = delta_temp / dt_h  # °F/hr
+
+            if prev["ac_running"]:
+                # Net rate = heat_gain - ac_cooling  →  ac_cooling = heat_gain - rate
+                # Use model heat gain as baseline
+                predicted_gain = self.thermal_model.calculate_heat_gain(
+                    hour=prev["ts"].hour,
+                    outdoor_temp=prev["outdoor_temp"],
+                    indoor_temp=prev["indoor_temp"],
+                )
+                ac_cool_obs.append(max(0.0, predicted_gain - rate))
+            elif prev["fan_running"]:
+                predicted_gain = self.thermal_model.calculate_heat_gain(
+                    hour=prev["ts"].hour,
+                    outdoor_temp=prev["outdoor_temp"],
+                    indoor_temp=prev["indoor_temp"],
+                )
+                fan_cool_obs.append(max(0.0, predicted_gain - rate))
+            elif prev["outdoor_temp"] < prev["indoor_temp"]:
+                # Natural passive case: observed rate ≈ heat gain
+                heat_gain_obs.append(rate)
+
+        updated_params: dict[str, float] = {}
+        old_params = dict(self.thermal_model.params)
+
+        if len(heat_gain_obs) >= 5:
+            observed_base = sum(heat_gain_obs) / len(heat_gain_obs)
+            # Smooth toward observed value with 50% weight
+            updated_params["base_heat_gain_rate"] = round(
+                0.5 * self.thermal_model.params["base_heat_gain_rate"] + 0.5 * observed_base, 3
+            )
+
+        if len(ac_cool_obs) >= 5:
+            observed_ac = sum(ac_cool_obs) / len(ac_cool_obs)
+            updated_params["ac_cooling_rate_mild"] = round(
+                0.5 * self.thermal_model.params["ac_cooling_rate_mild"] + 0.5 * observed_ac, 3
+            )
+
+        if len(fan_cool_obs) >= 5:
+            observed_fan_rate = sum(fan_cool_obs) / len(fan_cool_obs)
+            # fan_cooling_effectiveness is per unit of temp_diff * wind_factor
+            # Store as direct rate adjustment
+            updated_params["fan_cooling_effectiveness"] = round(
+                0.5 * self.thermal_model.params["fan_cooling_effectiveness"]
+                + 0.5 * (observed_fan_rate / 10.0),  # Normalise by typical temp diff
+                4,
+            )
+
+        if updated_params:
+            self.thermal_model.update_params(updated_params)
+            await self.learning_module.save_params(updated_params)
+            _LOGGER.info(
+                "Calibrated %s from %d days of history. Updates: %s",
+                self.room_name, days, updated_params,
+            )
+
+        return {
+            "samples_used": len(timeline),
+            "heat_gain_samples": len(heat_gain_obs),
+            "fan_cool_samples": len(fan_cool_obs),
+            "ac_cool_samples": len(ac_cool_obs),
+            "params_before": old_params,
+            "params_after": dict(self.thermal_model.params),
+            "updated": updated_params,
+        }
 
     async def async_record_actual_outcome(
         self, timestamp: datetime, actual_temp: float
@@ -276,3 +470,76 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if updated_params:
             self.thermal_model.update_params(updated_params)
             _LOGGER.info("Updated thermal model parameters from learning: %s", updated_params)
+
+    async def async_calibrate_from_history(self, days: int = 30) -> dict[str, Any]:
+        """Load history from recorder and tune the thermal model.
+
+        Builds entity_roles from the room's configured sensors, queries the
+        recorder for the last `days` days, runs the replay engine, and applies
+        any suggested parameter adjustments.
+
+        Returns a summary dict with metrics and any applied changes.
+        """
+        from .historical_replay import async_load_from_recorder, HistoricalReplayEngine
+
+        entity_roles: dict[str, str] = {}
+
+        indoor = self.config.get(CONF_INDOOR_TEMP_SENSOR)
+        outdoor = self.config.get(CONF_OUTDOOR_TEMP_SENSOR)
+        if not indoor or not outdoor:
+            return {"error": "indoor_temp and outdoor_temp sensors are required"}
+
+        entity_roles["indoor_temp"] = indoor
+        entity_roles["outdoor_temp"] = outdoor
+
+        for role, conf_key in (
+            ("fan_running", CONF_FAN_SENSOR),
+            ("ac_running", CONF_AC_SENSOR),
+            ("window_open", CONF_WINDOW_SENSOR),
+        ):
+            entity_id = self.config.get(conf_key)
+            if entity_id:
+                entity_roles[role] = entity_id
+
+        _LOGGER.info(
+            "Calibrating %s from %d days of history (entities: %s)",
+            self.room_name, days, list(entity_roles.values()),
+        )
+
+        try:
+            data_points = await async_load_from_recorder(
+                self.hass, entity_roles, days=days
+            )
+        except Exception as err:
+            return {"error": f"Failed to load recorder history: {err}"}
+
+        if len(data_points) < 10:
+            return {
+                "error": f"Too few data points ({len(data_points)}) — need at least 10",
+                "points_loaded": len(data_points),
+            }
+
+        replay = HistoricalReplayEngine(self.thermal_model, self.strategy_engine)
+        results = replay.replay_data(data_points)
+
+        if not results:
+            return {
+                "error": "No replay results (not enough overlapping data)",
+                "points_loaded": len(data_points),
+            }
+
+        metrics = replay.calculate_metrics(results)
+        suggestions = replay.suggest_parameter_adjustments(results)
+
+        if suggestions:
+            self.thermal_model.update_params(suggestions)
+            await self.learning_module.save_params(suggestions)
+            _LOGGER.info("Calibration applied parameter updates for %s: %s", self.room_name, suggestions)
+
+        return {
+            "room": self.room_name,
+            "points_loaded": len(data_points),
+            "replay_results": len(results),
+            "metrics": metrics,
+            "parameter_adjustments": suggestions,
+        }

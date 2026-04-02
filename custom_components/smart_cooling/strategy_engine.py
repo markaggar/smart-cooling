@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -85,13 +85,13 @@ class StrategyEngine:
         self,
         current_conditions: dict[str, Any],
         prediction: TemperaturePrediction,
+        tolerance_minutes: int = 30,
     ) -> CoolingStrategy:
         """Determine the best cooling strategy.
         
-        Priority order:
-        1. Natural cooling (windows) if conditions allow
-        2. Fan cooling if temp advantage exists
-        3. AC if other methods insufficient
+        Tolerance-aware priority: if a lower-energy method (fan/window) can reach
+        target within target_time + tolerance_minutes, prefer it over AC.
+        Priority: natural > fan > AC
         """
         indoor_temp = current_conditions.get("indoor_temp", 72.0)
         outdoor_temp = current_conditions.get("outdoor_temp", 70.0)
@@ -105,7 +105,8 @@ class StrategyEngine:
         ac_running = current_conditions.get("ac_running", False)
         
         cooling_deficit = prediction.cooling_deficit
-        hours_to_bedtime = self._hours_from_conditions(current_conditions)
+        hours_to_target = self._hours_from_conditions(current_conditions)
+        tolerance_hours = tolerance_minutes / 60.0
         
         # Check if we need cooling at all
         if cooling_deficit <= self.comfort_tolerance:
@@ -114,7 +115,7 @@ class StrategyEngine:
                 timing="",
                 predicted_temp=prediction.predicted_bedtime_temp,
                 target_temp=target_temp,
-                reasoning="Temperature within comfort range",
+                reasoning=self._no_action_reasoning(indoor_temp, target_temp, outdoor_temp, ac_running, fan_running),
                 confidence=0.9,
             )
         
@@ -122,59 +123,79 @@ class StrategyEngine:
         temp_advantage = indoor_temp - outdoor_temp
         has_temp_advantage = temp_advantage >= self.min_temp_advantage
         aqi_ok = aqi <= self.aqi_threshold
-        
+
         strategies = []
-        
-        # Evaluate natural cooling (window only)
+
+        # Evaluate natural cooling (open window, no fan)
         if has_temp_advantage and aqi_ok:
+            natural_h = self.thermal_model.find_hours_to_cool_to_target(
+                current_conditions, "natural",
+            )
+            natural_within_tolerance = (
+                natural_h is not None and natural_h <= (hours_to_target + tolerance_hours)
+            )
             natural_prediction = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
-                hours_ahead=hours_to_bedtime,
-                cooling_strategy=None,  # Natural means no active cooling modeled
+                hours_ahead=hours_to_target,
+                cooling_strategy=None,
             )
             strategies.append({
                 "method": CoolingMethod.OPEN_WINDOW,
                 "prediction": natural_prediction,
-                "achieves_target": natural_prediction.cooling_deficit <= self.comfort_tolerance,
+                "hours_to_cool": natural_h,
+                "achieves_target": natural_within_tolerance,
             })
-        
+
         # Evaluate fan cooling
         if has_temp_advantage and aqi_ok:
+            fan_h = self.thermal_model.find_hours_to_cool_to_target(
+                current_conditions, "fan",
+            )
+            fan_within_tolerance = (
+                fan_h is not None and fan_h <= (hours_to_target + tolerance_hours)
+            )
             fan_prediction = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
-                hours_ahead=hours_to_bedtime,
+                hours_ahead=hours_to_target,
                 cooling_strategy="fan",
             )
             strategies.append({
                 "method": CoolingMethod.START_FAN,
                 "prediction": fan_prediction,
-                "achieves_target": fan_prediction.cooling_deficit <= self.comfort_tolerance,
+                "hours_to_cool": fan_h,
+                "achieves_target": fan_within_tolerance,
             })
-        
-        # Evaluate AC cooling
+
+        # Evaluate AC cooling (always available as fallback)
+        ac_h = self.thermal_model.find_hours_to_cool_to_target(
+            current_conditions, "ac",
+        )
+        ac_within_tolerance = (
+            ac_h is not None and ac_h <= (hours_to_target + tolerance_hours)
+        )
         ac_prediction = self.thermal_model.predict_temperature(
             current_conditions=current_conditions,
-            hours_ahead=hours_to_bedtime,
+            hours_ahead=hours_to_target,
             cooling_strategy="ac",
         )
         strategies.append({
             "method": CoolingMethod.START_AC,
             "prediction": ac_prediction,
-            "achieves_target": ac_prediction.cooling_deficit <= self.comfort_tolerance,
+            "hours_to_cool": ac_h,
+            "achieves_target": ac_within_tolerance,
         })
-        
-        # Select best strategy (prefer energy efficiency)
-        # Priority: natural > fan > AC
+
+        # Select best strategy (prefer energy efficiency — first that achieves within tolerance)
         best_strategy = None
-        for strategy in strategies:
-            if strategy["achieves_target"]:
-                best_strategy = strategy
+        for s in strategies:
+            if s["achieves_target"]:
+                best_strategy = s
                 break
-        
-        # If nothing achieves target, use AC as fallback
+
+        # Nothing achieves target even with tolerance — fall back to AC
         if best_strategy is None:
-            best_strategy = strategies[-1]  # AC is always last
-        
+            best_strategy = strategies[-1]
+
         # Adjust method based on current device states
         method = best_strategy["method"]
         if method == CoolingMethod.START_FAN and fan_running:
@@ -183,69 +204,189 @@ class StrategyEngine:
             method = CoolingMethod.CONTINUE_AC
         elif method == CoolingMethod.OPEN_WINDOW and window_open:
             method = CoolingMethod.KEEP_WINDOW_OPEN
-        
+
+        reasoning = self._generate_reasoning(
+            method=method,
+            conditions=current_conditions,
+            strategy=best_strategy,
+            strategies=strategies,
+            tolerance_minutes=tolerance_minutes,
+            window_open=window_open,
+            fan_running=fan_running,
+            ac_running=ac_running,
+            has_temp_advantage=has_temp_advantage,
+            aqi_ok=aqi_ok,
+            temp_advantage=temp_advantage,
+            wind_speed=wind_speed,
+            aqi=aqi,
+            hours_to_target=hours_to_target,
+        )
+
         return CoolingStrategy(
             method=method,
-            timing="NOW!" if best_strategy["achieves_target"] else self._calculate_timing(current_conditions),
+            timing="NOW!" if best_strategy["achieves_target"] else "LATE — target may not be reached",
             predicted_temp=best_strategy["prediction"].predicted_bedtime_temp,
             target_temp=target_temp,
-            reasoning=self._generate_reasoning(method, current_conditions, best_strategy),
-            confidence=0.7 if best_strategy["achieves_target"] else 0.5,
+            reasoning=reasoning,
+            confidence=0.7 if best_strategy["achieves_target"] else 0.4,
             alternatives=[
                 {
                     "method": s["method"].value,
-                    "predicted_temp": s["prediction"].predicted_bedtime_temp,
+                    "predicted_temp": round(s["prediction"].predicted_bedtime_temp, 1),
+                    "hours_to_cool": round(s["hours_to_cool"], 1) if s["hours_to_cool"] is not None else None,
                     "achieves_target": s["achieves_target"],
                 }
                 for s in strategies
-                if s != best_strategy
+                if s is not best_strategy
             ],
         )
 
-    def _hours_from_conditions(self, conditions: dict[str, Any]) -> float:
-        """Extract hours to bedtime from conditions."""
-        # This should match coordinator's calculation
-        bedtime_str = conditions.get("bedtime", "22:30:00")
-        current_time = conditions.get("current_time", datetime.now())
-        
-        try:
-            bedtime = datetime.strptime(bedtime_str, "%H:%M:%S").time()
-            bedtime_today = current_time.replace(
-                hour=bedtime.hour, minute=bedtime.minute, second=0, microsecond=0
-            )
-            if bedtime_today < current_time:
-                from datetime import timedelta
-                bedtime_today += timedelta(days=1)
-            return (bedtime_today - current_time).total_seconds() / 3600
-        except ValueError:
-            return 8.0
+    def _no_action_reasoning(
+        self,
+        indoor_temp: float,
+        target_temp: float,
+        outdoor_temp: float,
+        ac_running: bool,
+        fan_running: bool,
+    ) -> str:
+        """Explain why no action is needed."""
+        parts = []
+        if indoor_temp <= target_temp:
+            parts.append(f"Room is already at {indoor_temp:.1f}°F, at or below target of {target_temp:.1f}°F")
+        else:
+            parts.append(f"Room is {indoor_temp:.1f}°F, within comfort range of {target_temp:.1f}°F target")
 
-    def _calculate_timing(self, conditions: dict[str, Any]) -> str:
-        """Calculate when cooling should start."""
-        # For now, always recommend NOW if cooling is needed
-        # More sophisticated timing can be added later
-        return "NOW!"
+        if ac_running:
+            parts.append("AC is already running and keeping up")
+        elif fan_running:
+            parts.append("Fan is running effectively")
+        elif outdoor_temp < indoor_temp:
+            parts.append(f"Outside air ({outdoor_temp:.1f}°F) is cooler and providing passive cooling")
+
+        return ". ".join(parts) + "."
 
     def _generate_reasoning(
         self,
         method: CoolingMethod,
         conditions: dict[str, Any],
         strategy: dict[str, Any],
+        strategies: list[dict[str, Any]],
+        tolerance_minutes: int,
+        window_open: bool,
+        fan_running: bool,
+        ac_running: bool,
+        has_temp_advantage: bool,
+        aqi_ok: bool,
+        temp_advantage: float,
+        wind_speed: float,
+        aqi: float,
+        hours_to_target: float,
     ) -> str:
-        """Generate human-readable reasoning for the recommendation."""
-        reasons = {
-            CoolingMethod.NO_ACTION: "Temperature comfortable",
-            CoolingMethod.OPEN_WINDOW: "Outside cooler than inside, natural cooling sufficient",
-            CoolingMethod.START_FAN: "Fan cooling available and efficient",
-            CoolingMethod.CONTINUE_FAN: "Fan already running effectively",
-            CoolingMethod.START_AC: "AC required to reach target temperature",
-            CoolingMethod.CONTINUE_AC: "AC already running, continue for target",
-            CoolingMethod.KEEP_WINDOW_OPEN: "Window open, natural cooling working",
-        }
-        
-        base_reason = reasons.get(method, "Cooling recommended")
-        
-        if not strategy["achieves_target"]:
-            base_reason += f" (may not fully reach target)"
-        
-        return base_reason
+        """Generate detailed, contextual reasoning for the recommendation."""
+        indoor_temp = conditions.get("indoor_temp", 72.0)
+        outdoor_temp = conditions.get("outdoor_temp", 70.0)
+        target_temp = conditions.get("target_temp", 72.0)
+        hours_to_cool = strategy.get("hours_to_cool")
+        achieves = strategy.get("achieves_target", False)
+
+        parts: list[str] = []
+
+        # --- What the room needs ---
+        deficit = indoor_temp - target_temp
+        h = int(hours_to_target)
+        m = int((hours_to_target - h) * 60)
+        time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
+        parts.append(
+            f"Room is {indoor_temp:.1f}°F, needs to reach {target_temp:.1f}°F "
+            f"({deficit:.1f}°F drop) in {time_str}"
+        )
+
+        # --- Outdoor conditions ---
+        if has_temp_advantage:
+            wind_str = f", with {wind_speed:.0f} mph wind" if wind_speed >= 3 else ""
+            parts.append(
+                f"Outside is {outdoor_temp:.1f}°F ({temp_advantage:.1f}°F cooler than inside{wind_str})"
+            )
+        else:
+            parts.append(
+                f"Outside ({outdoor_temp:.1f}°F) is not cool enough for natural cooling "
+                f"(need {self.min_temp_advantage:.0f}°F+ advantage)"
+            )
+
+        # --- AQI note if relevant ---
+        if not aqi_ok:
+            parts.append(f"AQI is {aqi:.0f} (above {self.aqi_threshold} threshold) — windows/fans not recommended")
+
+        # --- Current device states ---
+        active_devices = []
+        if ac_running:
+            active_devices.append("AC is on")
+        if fan_running:
+            active_devices.append("fan is running")
+        if window_open:
+            active_devices.append("window is open")
+        if active_devices:
+            parts.append(", ".join(active_devices).capitalize())
+
+        # --- Why this method was chosen ---
+        fan_strategy = next((s for s in strategies if s["method"] == CoolingMethod.START_FAN), None)
+        ac_strategy = next((s for s in strategies if s["method"] == CoolingMethod.START_AC), None)
+
+        if method in (CoolingMethod.START_FAN, CoolingMethod.CONTINUE_FAN):
+            if hours_to_cool is not None:
+                cool_h = int(hours_to_cool)
+                cool_m = int((hours_to_cool - cool_h) * 60)
+                cool_str = f"{cool_h}h {cool_m}m" if cool_h > 0 else f"{cool_m} min"
+                parts.append(f"Fan will reach target in {cool_str}")
+            if tolerance_minutes > 0 and achieves:
+                parts.append(f"This is within the {tolerance_minutes}-minute tolerance — fan preferred over AC to save energy")
+            if ac_strategy and ac_strategy.get("hours_to_cool") is not None:
+                ac_h = ac_strategy["hours_to_cool"]
+                parts.append(f"AC would be faster ({ac_h:.1f}h) but not needed given tolerance")
+
+        elif method in (CoolingMethod.START_AC, CoolingMethod.CONTINUE_AC):
+            if fan_strategy:
+                fan_h = fan_strategy.get("hours_to_cool")
+                if fan_h is None:
+                    parts.append("Fan cannot cool the room enough — AC required")
+                elif not fan_strategy.get("achieves_target"):
+                    parts.append(
+                        f"Fan would take {fan_h:.1f}h, which exceeds the {tolerance_minutes}-minute tolerance — AC required"
+                    )
+            if hours_to_cool is not None:
+                cool_h = int(hours_to_cool)
+                cool_m = int((hours_to_cool - cool_h) * 60)
+                cool_str = f"{cool_h}h {cool_m}m" if cool_h > 0 else f"{cool_m} min"
+                parts.append(f"AC will reach target in {cool_str}")
+
+        elif method in (CoolingMethod.OPEN_WINDOW, CoolingMethod.KEEP_WINDOW_OPEN):
+            if hours_to_cool is not None:
+                parts.append(f"Natural ventilation will reach target in {hours_to_cool:.1f}h")
+
+        elif method == CoolingMethod.NO_ACTION:
+            pass  # Handled by _no_action_reasoning
+
+        # --- Late warning ---
+        if not achieves:
+            parts.append(
+                f"Target may not be reached by the deadline — consider starting earlier or using AC"
+            )
+
+        return ". ".join(parts) + "."
+
+    def _hours_from_conditions(self, conditions: dict[str, Any]) -> float:
+        """Extract hours to target time from conditions."""
+        target_time_str = conditions.get("target_time", conditions.get("bedtime", "22:30:00"))
+        current_time = conditions.get("current_time", datetime.now())
+
+        try:
+            target_time = datetime.strptime(target_time_str, "%H:%M:%S").time()
+            target_today = current_time.replace(
+                hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0
+            )
+            if target_today < current_time:
+                target_today += timedelta(days=1)
+            return (target_today - current_time).total_seconds() / 3600
+        except ValueError:
+            return 8.0
+

@@ -1,7 +1,11 @@
 """Historical data replay system for testing and learning.
 
-This module allows loading historical sensor data from spreadsheets and replaying
-it through the thermal model to validate predictions and train parameters.
+This module loads historical sensor data (from HA recorder or CSV export) and
+replays it through the thermal model to validate predictions and tune parameters.
+
+CSV import uses the standard HA history export format:
+    entity_id,state,last_changed
+The caller provides entity_id-to-role mappings so no column names are hardcoded.
 """
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 try:
     import pandas as pd
@@ -445,3 +449,109 @@ def generate_synthetic_data(
         ))
     
     return points
+
+
+async def async_load_from_recorder(
+    hass: Any,
+    entity_roles: dict[str, str],
+    days: int = 30,
+) -> list[HistoricalDataPoint]:
+    """Load historical data directly from the HA recorder database.
+
+    No CSV export required — uses the recorder that HA already maintains.
+
+    Args:
+        hass: HomeAssistant instance
+        entity_roles: Mapping of role → entity_id, e.g.:
+            {
+                "indoor_temp":  "sensor.master_bed_temperature",
+                "outdoor_temp": "sensor.outside_temperature",
+                "fan_running":  "binary_sensor.window_fan",
+                "ac_running":   "binary_sensor.ac_on",
+                "window_open":  "binary_sensor.bedroom_window",
+            }
+            Only "indoor_temp" and "outdoor_temp" are required.
+        days: How many days of history to load (default 30).
+
+    Returns:
+        Sorted list of HistoricalDataPoint objects, one per minute bucket
+        where at least indoor + outdoor readings are available.
+    """
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.history import get_significant_states
+    from homeassistant.util import dt as dt_util
+
+    required = {"indoor_temp", "outdoor_temp"}
+    missing = required - entity_roles.keys()
+    if missing:
+        raise ValueError(f"entity_roles must include: {missing}")
+
+    entity_ids = list(entity_roles.values())
+    end_time = dt_util.utcnow()
+    start_time = end_time - timedelta(days=days)
+
+    _LOGGER.info(
+        "Loading %d days of recorder history for %s", days, entity_ids
+    )
+
+    # Recorder queries are blocking — run in the executor thread
+    recorder = get_instance(hass)
+    states_by_entity: dict[str, list] = await recorder.async_add_executor_job(
+        get_significant_states,
+        hass,
+        start_time,
+        end_time,
+        entity_ids,
+        None,   # filters
+        True,   # include_start_time_state
+        True,   # significant_changes_only
+        False,  # minimal_response
+        False,  # no_attributes
+    )
+
+    # Build a reverse map: entity_id → role
+    entity_to_role = {v: k for k, v in entity_roles.items()}
+
+    # Bucket readings by minute
+    buckets: dict[datetime, dict[str, Any]] = {}
+    for entity_id, states in states_by_entity.items():
+        role = entity_to_role.get(entity_id)
+        if not role:
+            continue
+        for state in states:
+            if state.state in ("unknown", "unavailable", ""):
+                continue
+            try:
+                value: Any
+                if role in ("fan_running", "ac_running", "window_open"):
+                    value = state.state == "on"
+                else:
+                    value = float(state.state)
+
+                # Round to nearest minute for alignment
+                ts = state.last_changed.replace(second=0, microsecond=0)
+                if ts not in buckets:
+                    buckets[ts] = {}
+                # Keep the latest value in the minute bucket
+                buckets[ts][role] = value
+            except (ValueError, TypeError):
+                continue
+
+    # Build data points from buckets that have the required fields
+    points: list[HistoricalDataPoint] = []
+    for ts in sorted(buckets):
+        b = buckets[ts]
+        if "indoor_temp" not in b or "outdoor_temp" not in b:
+            continue
+        points.append(HistoricalDataPoint(
+            timestamp=ts,
+            indoor_temp=b["indoor_temp"],
+            outdoor_temp=b["outdoor_temp"],
+            fan_running=b.get("fan_running", False),
+            ac_running=b.get("ac_running", False),
+            window_open=b.get("window_open", False),
+        ))
+
+    _LOGGER.info("Loaded %d data points from recorder", len(points))
+    return points
+
