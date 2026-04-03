@@ -199,6 +199,15 @@ A segment must accumulate at least 3–5 validated outcomes before any adjustmen
 
 **Learning vs. Calibration:** Learning adjusts parameters incrementally from each night's outcome. Calibration (`smart_cooling.calibrate`) runs a full OLS regression against weeks of recorder history and is the faster way to get accurate initial values — especially for `thermal_transfer_coefficient`, which requires a wide range of outdoor temperatures to estimate reliably from nightly outcomes alone.
 
+**Installed during hot weather?** Most people install this integration when it first gets hot — which means the AC runs frequently and nearly all nightly predictions are recorded while AC is on. In that scenario, only `ac_cooling_rate_mild` and `ac_cooling_rate_hot` accumulate enough records to tune. The passive, window, and fan segments stay at factory defaults until enough cool-weather nights pass where AC was not running at prediction time.
+
+This matters for spring and autumn: if your first cool snap arrives and the system recommends opening windows, the `natural_cooling_effectiveness` and `fan_cooling_effectiveness` values it uses will be the defaults — not tuned to your room. The recommendation will still be directionally correct (the forecast-based simulation will determine *whether* to open a window), but the predicted temperature at the deadline may be less accurate.
+
+**Recommended approach for new installs:**
+1. Run for a few weeks including a mix of AC-on and AC-off evenings
+2. Then run `smart_cooling.calibrate` — it processes all recorder history (not just nightly prediction events) and can extract passive and fan cooling rates from any period the sensors show AC was off, regardless of what mode was active at prediction time
+3. Re-run calibrate at the start of each season (spring, autumn) when the dominant cooling mode shifts
+
 ---
 
 ## Physics Parameters
