@@ -9,6 +9,8 @@ A Home Assistant custom integration that predicts whether your room will reach a
 - **Hourly forecast-aware predictions** — simulates indoor temperature hour-by-hour using your weather entity's forecast, not just current outdoor temp
 - **Physics-based thermal model** — accounts for wall insulation, solar gain, passive ventilation, fan, and AC cooling rates; fan/window effectiveness reduced by high outdoor humidity
 - **Energy-efficient strategy selection** — prefers open window → fan → AC, escalating only when needed
+- **Lazy-start timing** — never shouts "NOW!" when there is buffer time; tells you the latest you need to act (e.g., *"Start fan by 9:45 PM"*) so devices run for the minimum time required
+- **Close-window detection** — if a window is open but outdoor conditions have turned counterproductive (outside warmer than inside, AQI spike, or over-cooling risk), the recommendation immediately switches to *"Close window"* with a reason
 - **Adaptive learning** — segmented by what was running (passive, window, fan, AC); each mode independently tunes its own parameters from nightly outcomes
 - **Tolerance-aware scheduling** — gives lower-energy methods extra time before escalating to AC
 - **8 sensors per room** — recommendation, predicted temp, deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning
@@ -145,17 +147,45 @@ The engine evaluates three methods in energy-efficiency order and picks the firs
 
 If no method can reach the target, AC is selected but the recommendation is labeled *"LATE — target may not be reached"*.
 
-The recommendation text reflects what is already running:
+The recommendation text reflects what is already running and how much time remains:
 
-| State | Recommendation |
+| State | Example recommendation |
 |---|---|
-| Window recommended, window closed | *Open window* |
-| Window recommended, window open | *Keep window open* |
-| Fan recommended, fan off | *Start fan* |
-| Fan recommended, fan running | *Continue fan* |
-| AC recommended, AC off | *Start AC* |
+| Window recommended, window closed, time to spare | *Open window by 9:45 PM* |
+| Window recommended, window closed, must act now | *Open window NOW!* |
+| Window recommended, window open | *Keep window open by 10:00 PM* |
+| Fan recommended, fan off, time to spare | *Start fan by 9:30 PM* |
+| Fan recommended, fan off, must act now | *Start fan NOW!* |
+| Fan recommended, fan running | *Continue fan by 9:50 PM* |
+| AC recommended, AC off, time to spare | *Start AC by 10:10 PM* |
 | AC recommended, AC running | *Continue AC* |
+| Cannot reach target in time | *Start AC LATE — target may not be reached* |
 | Already at/near target | *No action needed* |
+| Window open, outside warmer than inside | *Close window* |
+| Window open, AQI too high | *Close window* |
+| Window open, room over-cooling | *Close window* |
+
+### Lazy-start Timing
+
+Once a cooling method is chosen, the engine calculates the latest time you need to start it and still reach the target on time (optionally within tolerance). Instead of triggering immediately, the recommendation shows:
+
+- **`by HH:MM AM/PM`** — you have buffer; start no later than this time
+- **`NOW!`** — ≤ 15 minutes of buffer remaining, act immediately
+- **`LATE — target may not be reached`** — even starting immediately won't hit the target
+
+This means a fan or AC that only needs 90 minutes to cool the room won't be triggered at 4 PM for a 10:30 PM bedtime. The `action_needed_by` sensor always shows the computed deadline as an absolute timestamp.
+
+### Close Window
+
+If a window is open but outdoor conditions have changed to make it counterproductive, `Close window` is recommended immediately with a plain-English reason. Three triggers:
+
+| Trigger | Condition | Example reasoning |
+|---|---|---|
+| Outside warmer than inside | `outdoor_temp ≥ indoor_temp` | *"Outside (74°F) is at or warmer than inside (72°F) — the window is adding heat, not removing it"* |
+| AQI too high | `AQI > 150` | *"AQI is 162 — switch to fan or AC for cooling"* |
+| Over-cooling risk | Room at target, outside ≥ 5°F below target | *"Room is already at target (68°F) and outside is 58°F — the room will over-cool without intervention"* |
+
+The close-window check runs before strategy selection, so it takes priority over any cooling recommendation.
 
 ### Tolerance
 
@@ -278,6 +308,9 @@ Increase `tolerance_minutes` (try 60 or 90) to give lower-energy methods more ti
 
 ### AC takes too long or too short
 Adjust `ac_cooling_rate_mild` and `ac_cooling_rate_hot` to match observed performance.
+
+### Close window triggers too often or not enough
+The over-cooling close-window trigger fires when the room is at target and outside is ≥ 5°F below target. This threshold is not currently configurable; if your room cools aggressively on cold nights, ensure your `base_heat_gain_rate` and `thermal_transfer_coefficient` are tuned accurately so the model predicts this correctly.
 
 ### Natural ventilation seems underrated
 Raise `natural_cooling_effectiveness` (try 0.3–0.5). The default is conservative — it represents only the passive airflow bonus on top of wall conduction, which already handles most cooling when outdoor air is much cooler than indoor.

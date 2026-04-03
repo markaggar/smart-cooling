@@ -78,5 +78,21 @@
                 }
             }
         }
+    },
+    "entity": {
+        "sensor": {
+            "recommended_strategy": {
+                "state": {
+                    "no_action": "No action needed",
+                    "open_window": "Open window",
+                    "start_fan": "Start fan",
+                    "continue_fan": "Continue fan",
+                    "start_ac": "Start AC",
+                    "continue_ac": "Continue AC",
+                    "keep_window_open": "Keep window open",
+                    "close_window": "Close window"
+                }
+            }
+        }
     }
 }

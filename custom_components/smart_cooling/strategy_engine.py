@@ -22,6 +22,7 @@ class CoolingMethod(Enum):
     START_AC = "start_ac"
     CONTINUE_AC = "continue_ac"
     KEEP_WINDOW_OPEN = "keep_window_open"
+    CLOSE_WINDOW = "close_window"
 
 
 @dataclass
@@ -61,6 +62,7 @@ class CoolingStrategy:
             CoolingMethod.START_AC: "Start AC",
             CoolingMethod.CONTINUE_AC: "Continue AC",
             CoolingMethod.KEEP_WINDOW_OPEN: "Keep window open",
+            CoolingMethod.CLOSE_WINDOW: "Close window",
         }
         
         text = method_display.get(self.method, self.method.value)
@@ -108,6 +110,23 @@ class StrategyEngine:
         hours_to_target = self._hours_from_conditions(current_conditions)
         tolerance_hours = tolerance_minutes / 60.0
         
+        # --- Close-window check ---
+        # If window is open but outdoor conditions make it counterproductive, say so
+        # before evaluating cooling strategies.
+        if window_open:
+            close_reason = self._close_window_reason(
+                indoor_temp, outdoor_temp, target_temp, aqi, cooling_deficit
+            )
+            if close_reason:
+                return CoolingStrategy(
+                    method=CoolingMethod.CLOSE_WINDOW,
+                    timing="",
+                    predicted_temp=prediction.predicted_bedtime_temp,
+                    target_temp=target_temp,
+                    reasoning=close_reason,
+                    confidence=0.9,
+                )
+
         # Check if we need cooling at all
         if cooling_deficit <= self.comfort_tolerance:
             return CoolingStrategy(
@@ -211,6 +230,25 @@ class StrategyEngine:
         elif method == CoolingMethod.OPEN_WINDOW and window_open:
             method = CoolingMethod.KEEP_WINDOW_OPEN
 
+        # --- Lazy-start timing ---
+        # If we have buffer before we must act, tell the user when to start rather
+        # than shouting "NOW!" for the entire afternoon.
+        tolerance_hours = tolerance_minutes / 60.0
+        hours_until_cool = best_strategy.get("hours_to_cool") or 0.0
+        delay_budget = hours_to_target + tolerance_hours - hours_until_cool
+        deferred_minutes = 15  # act if ≤15 min of budget left
+        current_time: datetime = current_conditions.get("current_time", datetime.now())
+
+        if best_strategy["achieves_target"] and delay_budget > (deferred_minutes / 60.0):
+            start_by = current_time + timedelta(hours=delay_budget)
+            # strftime %-I is Linux-only; strip leading zero manually for cross-platform
+            hour_str = start_by.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+            timing = f"by {hour_str}"
+        elif best_strategy["achieves_target"]:
+            timing = "NOW!"
+        else:
+            timing = "LATE — target may not be reached"
+
         reasoning = self._generate_reasoning(
             method=method,
             conditions=current_conditions,
@@ -227,7 +265,7 @@ class StrategyEngine:
 
         return CoolingStrategy(
             method=method,
-            timing="NOW!" if best_strategy["achieves_target"] else "LATE — target may not be reached",
+            timing=timing,
             predicted_temp=best_strategy["prediction"].predicted_bedtime_temp,
             target_temp=target_temp,
             reasoning=reasoning,
@@ -243,6 +281,37 @@ class StrategyEngine:
                 if s is not best_strategy
             ],
         )
+
+    def _close_window_reason(
+        self,
+        indoor_temp: float,
+        outdoor_temp: float,
+        target_temp: float,
+        aqi: float,
+        cooling_deficit: float,
+    ) -> str | None:
+        """Return a reason string if the open window should be closed, else None."""
+        # Bad air quality — always close
+        if aqi > self.aqi_threshold:
+            return (
+                f"Close window: AQI is {aqi:.0f} (above {self.aqi_threshold} threshold). "
+                f"Switch to fan or AC for cooling."
+            )
+        # Outside warmer than inside — window is bringing heat in
+        if outdoor_temp >= indoor_temp:
+            return (
+                f"Close window: outside ({outdoor_temp:.1f}°F) is at or warmer than inside "
+                f"({indoor_temp:.1f}°F) — the window is adding heat, not removing it."
+            )
+        # Room is already at or well below target and outside is much colder — over-cooling risk
+        if cooling_deficit <= self.comfort_tolerance and outdoor_temp < target_temp - 5.0:
+            excess = indoor_temp - outdoor_temp
+            return (
+                f"Close window: room is already at target ({indoor_temp:.1f}°F) and outside "
+                f"is {outdoor_temp:.1f}°F — {excess:.1f}°F colder than inside. "
+                f"The room will over-cool without intervention."
+            )
+        return None
 
     def _no_action_reasoning(
         self,
