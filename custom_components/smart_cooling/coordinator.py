@@ -176,9 +176,43 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (ValueError, TypeError):
             return 50.0
 
+    def _sensor_ready(self, entity_id: str | None) -> bool:
+        """Return True if the entity exists and has a real (non-startup) value."""
+        if not entity_id:
+            return False
+        state = self.hass.states.get(entity_id)
+        return state is not None and state.state not in ("unknown", "unavailable")
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from sensors and compute recommendations."""
         try:
+            # Guard against startup race: if critical sensors aren't ready yet,
+            # return the last good dataset (sensors keep their previous state) or
+            # raise UpdateFailed on the very first run so sensors show "unavailable"
+            # rather than computing garbage from hardcoded defaults.
+            indoor_sensor = self.config.get(CONF_INDOOR_TEMP_SENSOR)
+            outdoor_sensor = self.config.get(CONF_OUTDOOR_TEMP_SENSOR)
+            target_sensor = (
+                self.config.get(CONF_TARGET_TEMP_ENTITY)
+                or self.config.get(CONF_BEDTIME_ENTITY)
+            )
+            critical_ready = (
+                self._sensor_ready(indoor_sensor)
+                and self._sensor_ready(outdoor_sensor)
+                and self._sensor_ready(target_sensor)
+            )
+            if not critical_ready:
+                if self.data:
+                    _LOGGER.debug(
+                        "%s: sensors not yet ready, keeping last good data",
+                        self.room_name,
+                    )
+                    return self.data
+                raise UpdateFailed(
+                    f"{self.room_name}: waiting for sensors to become available "
+                    f"({indoor_sensor}, {outdoor_sensor}, {target_sensor})"
+                )
+
             # Get hourly forecast (includes wind_speed per forecast item)
             forecast = await self._get_hourly_forecast()
             current_wind_speed = self._get_current_wind_speed(forecast)
