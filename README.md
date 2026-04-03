@@ -7,9 +7,9 @@ A Home Assistant custom integration that predicts whether your room will reach a
 ## Features
 
 - **Hourly forecast-aware predictions** — simulates indoor temperature hour-by-hour using your weather entity's forecast, not just current outdoor temp
-- **Physics-based thermal model** — accounts for wall insulation, solar gain, passive ventilation, fan, and AC cooling rates
+- **Physics-based thermal model** — accounts for wall insulation, solar gain, passive ventilation, fan, and AC cooling rates; fan/window effectiveness reduced by high outdoor humidity
 - **Energy-efficient strategy selection** — prefers open window → fan → AC, escalating only when needed
-- **Adaptive learning** — tracks prediction accuracy over time and builds confidence score
+- **Adaptive learning** — segmented by what was running (passive, window, fan, AC); each mode independently tunes its own parameters from nightly outcomes
 - **Tolerance-aware scheduling** — gives lower-energy methods extra time before escalating to AC
 - **8 sensors per room** — recommendation, predicted temp, deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning
 
@@ -122,11 +122,16 @@ physics_params:              # current model parameters for this room
 
 Every update cycle, the model simulates the room temperature hour-by-hour from now until the target time. For each hour it:
 
-1. Looks up the outdoor temperature from the **hourly weather forecast** (matched within 90 minutes)
+1. Looks up the outdoor temperature, wind speed, and humidity from the **hourly weather forecast** (matched within 90 minutes)
 2. Computes heat exchange through walls: `thermal_transfer_coefficient × (outdoor − indoor)`
 3. Adds `base_heat_gain_rate` for internal heat sources
 4. Adds solar gain if it is peak hours (noon–6 PM)
-5. Subtracts cooling from the active strategy (natural ventilation, fan, or AC)
+5. Subtracts cooling from the active strategy:
+   - **AC**: fixed rate based on outdoor temp (unaffected by humidity)
+   - **Fan**: scales with temp differential and per-hour wind speed; reduced by high outdoor humidity
+   - **Natural ventilation**: scales with temp differential and wind; same humidity reduction as fan
+
+The humidity penalty for fan/window: $\text{factor} = \max(0.5,\ 1 - (RH - 40) \times 0.005)$, so 60% RH → 10% reduction, 90% RH → 25% reduction.
 
 The simulation produces a predicted indoor temperature at the target time and an `hours_to_cool` estimate for each strategy evaluated.
 
@@ -177,6 +182,22 @@ Confidence is built from validated predictions — cases where a prediction was 
 | ≥ 4.9°F | 30% (floor) |
 
 Confidence accumulates automatically — every night after the target time passes, the actual reading is recorded and the model is scored. After a week or two of normal use it has a meaningful value.
+
+### Learning System
+
+Beyond confidence scoring, the integration tunes its physics parameters from nightly prediction outcomes. Learning is **segmented by what was running at prediction time**, so errors are attributed to the right parameter:
+
+| Conditions at prediction time | Parameter adjusted |
+|---|---|
+| No AC, fan, or window open | `base_heat_gain_rate` — room warmer than predicted → raise |
+| Window open, no fan, no AC | `natural_cooling_effectiveness` — room warmer → lower (window less effective than modeled) |
+| Fan running (with or without window) | `fan_cooling_effectiveness` — room warmer → lower |
+| AC running, outdoor < 82°F | `ac_cooling_rate_mild` — room warmer → lower |
+| AC running, outdoor ≥ 82°F | `ac_cooling_rate_hot` — room warmer → lower |
+
+A segment must accumulate at least 3–5 validated outcomes before any adjustment is made, and only if the mean error exceeds 0.5°F. The learning rate is conservative (0.1) so parameters drift gradually rather than overreacting to a single unusual night.
+
+**Learning vs. Calibration:** Learning adjusts parameters incrementally from each night's outcome. Calibration (`smart_cooling.calibrate`) runs a full OLS regression against weeks of recorder history and is the faster way to get accurate initial values — especially for `thermal_transfer_coefficient`, which requires a wide range of outdoor temperatures to estimate reliably from nightly outcomes alone.
 
 ---
 
@@ -251,6 +272,12 @@ Adjust `ac_cooling_rate_mild` and `ac_cooling_rate_hot` to match observed perfor
 
 ### Natural ventilation seems underrated
 Raise `natural_cooling_effectiveness` (try 0.3–0.5). The default is conservative — it represents only the passive airflow bonus on top of wall conduction, which already handles most cooling when outdoor air is much cooler than indoor.
+
+### Fan/window cooling weaker on humid nights
+This is expected and automatic — the model reduces fan and natural ventilation effectiveness when outdoor humidity is high (see humidity penalty formula in the Thermal Model section). Your weather entity must provide `humidity` in its hourly forecast for this to work; otherwise it defaults to 50% RH.
+
+### Learning adjustments seem too slow
+The continuous learning makes small conservative adjustments (learning rate 0.1) once a segment has ≥ 3–5 validated outcomes with mean error > 0.5°F. For faster initial tuning, run `smart_cooling.calibrate` — it processes weeks of recorder history in one pass.
 
 ### Confidence stuck at 50%
 Normal for the first week or two. The model needs at least 10 nights where the target time passes and the actual temperature is recorded.
