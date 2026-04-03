@@ -115,7 +115,10 @@ class StrategyEngine:
                 timing="",
                 predicted_temp=prediction.predicted_bedtime_temp,
                 target_temp=target_temp,
-                reasoning=self._no_action_reasoning(indoor_temp, target_temp, outdoor_temp, ac_running, fan_running),
+                reasoning=self._no_action_reasoning(
+                    indoor_temp, target_temp, outdoor_temp, ac_running, fan_running,
+                    prediction.predicted_bedtime_temp, hours_to_target,
+                ),
                 confidence=0.9,
             )
         
@@ -248,11 +251,17 @@ class StrategyEngine:
         outdoor_temp: float,
         ac_running: bool,
         fan_running: bool,
+        predicted_bedtime_temp: float | None = None,
+        hours_to_target: float = 0.0,
     ) -> str:
         """Explain why no action is needed."""
         parts = []
         if indoor_temp <= target_temp:
-            parts.append(f"Room is already at {indoor_temp:.1f}°F, at or below target of {target_temp:.1f}°F")
+            below_by = target_temp - indoor_temp
+            parts.append(
+                f"Room is already at {indoor_temp:.1f}°F, "
+                f"{below_by:.1f}°F below target of {target_temp:.1f}°F"
+            )
         else:
             parts.append(f"Room is {indoor_temp:.1f}°F, within comfort range of {target_temp:.1f}°F target")
 
@@ -262,6 +271,20 @@ class StrategyEngine:
             parts.append("Fan is running effectively")
         elif outdoor_temp < indoor_temp:
             parts.append(f"Outside air ({outdoor_temp:.1f}°F) is cooler and providing passive cooling")
+
+        # Warn if the room will continue drifting well below target
+        if (
+            predicted_bedtime_temp is not None
+            and hours_to_target > 0
+            and predicted_bedtime_temp < target_temp - 1.5
+        ):
+            h = int(hours_to_target)
+            m = int((hours_to_target - h) * 60)
+            time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
+            parts.append(
+                f"Without heating, the room will drift to ~{predicted_bedtime_temp:.0f}°F "
+                f"in {time_str} — consider adding heat to avoid over-cooling"
+            )
 
         return ". ".join(parts) + "."
 
