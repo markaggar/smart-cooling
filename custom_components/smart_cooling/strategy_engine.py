@@ -217,10 +217,7 @@ class StrategyEngine:
             window_open=window_open,
             fan_running=fan_running,
             ac_running=ac_running,
-            has_temp_advantage=has_temp_advantage,
             aqi_ok=aqi_ok,
-            temp_advantage=temp_advantage,
-            wind_speed=wind_speed,
             aqi=aqi,
             hours_to_target=hours_to_target,
         )
@@ -278,17 +275,17 @@ class StrategyEngine:
         window_open: bool,
         fan_running: bool,
         ac_running: bool,
-        has_temp_advantage: bool,
         aqi_ok: bool,
-        temp_advantage: float,
-        wind_speed: float,
         aqi: float,
         hours_to_target: float,
     ) -> str:
-        """Generate detailed, contextual reasoning for the recommendation."""
+        """Generate detailed, contextual reasoning using forecast trajectory."""
         indoor_temp = conditions.get("indoor_temp", 72.0)
         outdoor_temp = conditions.get("outdoor_temp", 70.0)
+        outdoor_humidity = conditions.get("outdoor_humidity", 50.0)
         target_temp = conditions.get("target_temp", 72.0)
+        forecast = conditions.get("forecast", [])
+        current_time: datetime = conditions.get("current_time", datetime.now())
         hours_to_cool = strategy.get("hours_to_cool")
         achieves = strategy.get("achieves_target", False)
 
@@ -304,21 +301,91 @@ class StrategyEngine:
             f"({deficit:.1f}°F drop) in {time_str}"
         )
 
-        # --- Outdoor conditions ---
-        if has_temp_advantage:
-            wind_str = f", with {wind_speed:.0f} mph wind" if wind_speed >= 3 else ""
-            parts.append(
-                f"Outside is {outdoor_temp:.1f}°F ({temp_advantage:.1f}°F cooler than inside{wind_str})"
-            )
-        else:
-            parts.append(
-                f"Outside ({outdoor_temp:.1f}°F) is not cool enough for natural cooling "
-                f"(need {self.min_temp_advantage:.0f}°F+ advantage)"
-            )
+        # --- Forecast trajectory ---
+        # Pull outdoor temps from forecast over the prediction window
+        forecast_temps: list[float] = []
+        forecast_humidities: list[float] = []
+        if forecast:
+            from datetime import timezone as _tz
 
-        # --- AQI note if relevant ---
+            def _to_utc(dt: datetime) -> datetime:
+                if dt.tzinfo is None:
+                    return dt.replace(tzinfo=_tz.utc)
+                return dt.astimezone(_tz.utc)
+
+            window_end_utc = _to_utc(current_time + timedelta(hours=hours_to_target))
+            now_utc = _to_utc(current_time)
+
+            for entry in forecast:
+                entry_time = entry.get("datetime")
+                if entry_time is None:
+                    continue
+                try:
+                    if isinstance(entry_time, str):
+                        entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+                    elif isinstance(entry_time, datetime):
+                        entry_dt = entry_time
+                    else:
+                        continue
+                    entry_utc = _to_utc(entry_dt)
+                    if now_utc <= entry_utc <= window_end_utc:
+                        t = entry.get("temperature")
+                        rh = entry.get("humidity")
+                        if t is not None:
+                            forecast_temps.append(float(t))
+                        if rh is not None:
+                            forecast_humidities.append(float(rh))
+                except (ValueError, AttributeError, OverflowError):
+                    continue
+
+        if forecast_temps:
+            min_forecast = min(forecast_temps)
+            max_forecast = max(forecast_temps)
+            if abs(max_forecast - min_forecast) >= 2.0:
+                # Temps are changing meaningfully — describe the trajectory
+                if forecast_temps[-1] < forecast_temps[0]:
+                    parts.append(
+                        f"Outdoor temp will drop from {outdoor_temp:.0f}°F now to "
+                        f"{min_forecast:.0f}°F by target time"
+                    )
+                else:
+                    parts.append(
+                        f"Outdoor temp rises from {outdoor_temp:.0f}°F now to "
+                        f"{max_forecast:.0f}°F — conditions warming through the window"
+                    )
+            else:
+                # Relatively stable — just report current
+                parts.append(f"Outdoor temp is stable around {outdoor_temp:.0f}°F")
+        else:
+            # No forecast data — fall back to current reading
+            diff = indoor_temp - outdoor_temp
+            if diff >= self.min_temp_advantage:
+                parts.append(f"Outside is {outdoor_temp:.1f}°F ({diff:.1f}°F cooler than inside)")
+            else:
+                parts.append(f"Outside is {outdoor_temp:.1f}°F (currently only {diff:.1f}°F cooler than inside)")
+
+        # --- Humidity note if it's materially affecting fan/window cooling ---
+        if method in (
+            CoolingMethod.START_FAN, CoolingMethod.CONTINUE_FAN,
+            CoolingMethod.OPEN_WINDOW, CoolingMethod.KEEP_WINDOW_OPEN,
+        ):
+            avg_humidity = (
+                sum(forecast_humidities) / len(forecast_humidities)
+                if forecast_humidities else outdoor_humidity
+            )
+            if avg_humidity >= 70:
+                reduction_pct = int(min(50, (avg_humidity - 40) * 0.5))
+                parts.append(
+                    f"High outdoor humidity ({avg_humidity:.0f}% RH) is reducing "
+                    f"ventilation effectiveness by ~{reduction_pct}%"
+                )
+
+        # --- AQI note ---
         if not aqi_ok:
-            parts.append(f"AQI is {aqi:.0f} (above {self.aqi_threshold} threshold) — windows/fans not recommended")
+            parts.append(
+                f"AQI is {aqi:.0f} (above {self.aqi_threshold} threshold) — "
+                f"windows/fans not recommended"
+            )
 
         # --- Current device states ---
         active_devices = []
@@ -332,47 +399,80 @@ class StrategyEngine:
             parts.append(", ".join(active_devices).capitalize())
 
         # --- Why this method was chosen ---
+        natural_strategy = next((s for s in strategies if s["method"] == CoolingMethod.OPEN_WINDOW), None)
         fan_strategy = next((s for s in strategies if s["method"] == CoolingMethod.START_FAN), None)
         ac_strategy = next((s for s in strategies if s["method"] == CoolingMethod.START_AC), None)
 
-        if method in (CoolingMethod.START_FAN, CoolingMethod.CONTINUE_FAN):
+        def _cool_time_str(hrs: float) -> str:
+            ch = int(hrs)
+            cm = int((hrs - ch) * 60)
+            return f"{ch}h {cm}m" if ch > 0 else f"{cm} min"
+
+        if method in (CoolingMethod.OPEN_WINDOW, CoolingMethod.KEEP_WINDOW_OPEN):
             if hours_to_cool is not None:
-                cool_h = int(hours_to_cool)
-                cool_m = int((hours_to_cool - cool_h) * 60)
-                cool_str = f"{cool_h}h {cool_m}m" if cool_h > 0 else f"{cool_m} min"
-                parts.append(f"Fan will reach target in {cool_str}")
+                parts.append(f"Natural ventilation will reach target in {_cool_time_str(hours_to_cool)}")
+                if forecast_temps and min(forecast_temps) < target_temp:
+                    parts.append(
+                        f"Forecast shows outdoor air dropping to {min(forecast_temps):.0f}°F — "
+                        f"passive cooling alone is sufficient"
+                    )
             if tolerance_minutes > 0 and achieves:
-                parts.append(f"This is within the {tolerance_minutes}-minute tolerance — fan preferred over AC to save energy")
+                parts.append(
+                    f"This is within the {tolerance_minutes}-minute tolerance — "
+                    f"no fan or AC needed"
+                )
+
+        elif method in (CoolingMethod.START_FAN, CoolingMethod.CONTINUE_FAN):
+            if natural_strategy:
+                nat_h = natural_strategy.get("hours_to_cool")
+                if nat_h is None or not natural_strategy.get("achieves_target"):
+                    parts.append("Natural ventilation alone is not enough — fan needed")
+            if hours_to_cool is not None:
+                parts.append(f"Fan will reach target in {_cool_time_str(hours_to_cool)}")
+            if tolerance_minutes > 0 and achieves:
+                parts.append(
+                    f"This is within the {tolerance_minutes}-minute tolerance — "
+                    f"fan preferred over AC to save energy"
+                )
             if ac_strategy and ac_strategy.get("hours_to_cool") is not None:
                 ac_h = ac_strategy["hours_to_cool"]
                 parts.append(f"AC would be faster ({ac_h:.1f}h) but not needed given tolerance")
 
         elif method in (CoolingMethod.START_AC, CoolingMethod.CONTINUE_AC):
-            if fan_strategy:
-                fan_h = fan_strategy.get("hours_to_cool")
-                if fan_h is None:
-                    parts.append("Fan cannot cool the room enough — AC required")
-                elif not fan_strategy.get("achieves_target"):
+            # Explain why lower-energy options were rejected
+            if not aqi_ok:
+                parts.append("Air quality prevents opening windows or using fan")
+            else:
+                if fan_strategy:
+                    fan_h = fan_strategy.get("hours_to_cool")
+                    if fan_h is None:
+                        # Check if forecast temps ever get below target
+                        if forecast_temps and min(forecast_temps) >= target_temp:
+                            parts.append(
+                                f"Outdoor air ({min(forecast_temps):.0f}°F min forecast) "
+                                f"won't drop below target — fan/window cannot cool the room"
+                            )
+                        else:
+                            parts.append("Fan cannot cool the room to target within 24 hours")
+                    elif not fan_strategy.get("achieves_target"):
+                        parts.append(
+                            f"Fan would take {fan_h:.1f}h, which exceeds the "
+                            f"{tolerance_minutes}-minute tolerance — AC required"
+                        )
+            if hours_to_cool is not None:
+                parts.append(f"AC will reach target in {_cool_time_str(hours_to_cool)}")
+            elif not achieves:
+                if forecast_temps and min(forecast_temps) >= target_temp:
                     parts.append(
-                        f"Fan would take {fan_h:.1f}h, which exceeds the {tolerance_minutes}-minute tolerance — AC required"
+                        f"Forecast low is {min(forecast_temps):.0f}°F — outdoor air stays "
+                        f"above target all night, even AC may struggle"
                     )
-            if hours_to_cool is not None:
-                cool_h = int(hours_to_cool)
-                cool_m = int((hours_to_cool - cool_h) * 60)
-                cool_str = f"{cool_h}h {cool_m}m" if cool_h > 0 else f"{cool_m} min"
-                parts.append(f"AC will reach target in {cool_str}")
-
-        elif method in (CoolingMethod.OPEN_WINDOW, CoolingMethod.KEEP_WINDOW_OPEN):
-            if hours_to_cool is not None:
-                parts.append(f"Natural ventilation will reach target in {hours_to_cool:.1f}h")
-
-        elif method == CoolingMethod.NO_ACTION:
-            pass  # Handled by _no_action_reasoning
 
         # --- Late warning ---
         if not achieves:
             parts.append(
-                f"Target may not be reached by the deadline — consider starting earlier or using AC"
+                "Target may not be reached by the deadline — "
+                "consider starting earlier or using AC"
             )
 
         return ". ".join(parts) + "."
