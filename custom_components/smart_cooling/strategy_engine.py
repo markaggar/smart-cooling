@@ -126,8 +126,11 @@ class StrategyEngine:
 
         strategies = []
 
-        # Evaluate natural cooling (open window, no fan)
-        if has_temp_advantage and aqi_ok:
+        # Evaluate natural cooling (open window, no fan).
+        # Don't gate on current outdoor temp — forecast may show outdoor dropping
+        # well below target later; find_hours_to_cool_to_target uses hourly forecast
+        # and returns None only if target is unreachable within 24h.
+        if aqi_ok:
             natural_h = self.thermal_model.find_hours_to_cool_to_target(
                 current_conditions, "natural",
             )
@@ -137,7 +140,7 @@ class StrategyEngine:
             natural_prediction = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
                 hours_ahead=hours_to_target,
-                cooling_strategy=None,
+                cooling_strategy="natural",
             )
             strategies.append({
                 "method": CoolingMethod.OPEN_WINDOW,
@@ -147,7 +150,7 @@ class StrategyEngine:
             })
 
         # Evaluate fan cooling
-        if has_temp_advantage and aqi_ok:
+        if aqi_ok:
             fan_h = self.thermal_model.find_hours_to_cool_to_target(
                 current_conditions, "fan",
             )

@@ -146,7 +146,7 @@ class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return prediction details."""
+        """Return prediction details including hourly breakdown and forecast diagnostics."""
         if not self.coordinator.data:
             return {}
         
@@ -154,7 +154,11 @@ class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
         if not prediction:
             return {}
         
-        return prediction.to_dict()
+        attrs = prediction.to_dict()
+        attrs["forecast_entries"] = self.coordinator.data.get("forecast_entries", 0)
+        attrs["forecast_sample"] = self.coordinator.data.get("forecast_sample", [])
+        attrs["physics_params"] = self.coordinator.data.get("learned_params", {})
+        return attrs
 
 
 class SmartCoolingDeficitSensor(SmartCoolingBaseSensor):

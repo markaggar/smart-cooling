@@ -77,7 +77,7 @@ GLOBAL_CONFIG_KEY: Final = "_global_config"
 # =============================================================================
 # These will be learned over time, stored per-room
 DEFAULT_PHYSICS_PARAMS: Final = {
-    "base_heat_gain_rate": 2.2,  # °F/hr passive heat gain
+    "base_heat_gain_rate": 0.5,  # °F/hr internal heat gain (appliances, body heat)
     "solar_gain_factor": 0.6,  # multiplier for solar heat
     "ac_cooling_rate_mild": 4.5,  # °F/hr when outdoor < 82°F
     "ac_cooling_rate_hot": 2.5,  # °F/hr when outdoor >= 82°F

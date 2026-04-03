@@ -254,17 +254,23 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             now = dt_util.now()
 
-            # Datetime when room will reach target (None = won't reach in 24h)
-            will_reach_target_at = (
-                now + timedelta(hours=hours_until_cool)
-                if hours_until_cool is not None
-                else None
-            )
+            # Datetime when room will reach target.
+            # hours_until_cool == 0.0 means already at/below target — treat as None
+            # so the sensor stays stable instead of ticking to "now" every minute.
+            if hours_until_cool is not None and hours_until_cool > 0.0:
+                will_reach_target_at = now + timedelta(hours=hours_until_cool)
+            else:
+                will_reach_target_at = None
 
-            # Latest time to START cooling so target is reached by target_time + tolerance
+            # Latest time to START cooling so target is reached by target_time + tolerance.
+            # None when no action is needed (room already at/below target and not
+            # predicted to rise above it).
             tolerance_hours = tolerance_minutes / 60.0
             target_datetime = now + timedelta(hours=hours_to_target)
-            if hours_until_cool is not None:
+            no_action = strategy.method.value == "no_action"
+            if no_action or (hours_until_cool is not None and hours_until_cool <= 0.0):
+                action_needed_by = None
+            elif hours_until_cool is not None:
                 # You can delay starting by (budget - time_it_takes)
                 delay_budget = hours_to_target + tolerance_hours - hours_until_cool
                 action_needed_by = now + timedelta(hours=max(0.0, delay_budget))
@@ -298,6 +304,12 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "hours_until_cool": hours_until_cool,
                 "will_reach_target_at": will_reach_target_at,
                 "action_needed_by": action_needed_by,
+                # Forecast diagnostics — visible in sensor attributes
+                "forecast_entries": len(forecast),
+                "forecast_sample": [
+                    {"datetime": str(f.get("datetime", "")), "temperature": f.get("temperature")}
+                    for f in forecast[:4]
+                ],
             }
             
         except Exception as err:

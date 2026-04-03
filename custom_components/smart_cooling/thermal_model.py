@@ -313,6 +313,19 @@ class ThermalModel:
         if not forecast:
             return {}
 
+        from datetime import timezone as _tz
+
+        def _to_utc(dt: datetime) -> datetime:
+            """Convert datetime to UTC; treat naive as UTC."""
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=_tz.utc)
+            return dt.astimezone(_tz.utc)
+
+        try:
+            target_utc = _to_utc(target_time)
+        except (AttributeError, ValueError, OverflowError):
+            return {}
+
         best_entry = None
         best_delta = float("inf")
 
@@ -321,35 +334,31 @@ class ThermalModel:
             if entry_time is None:
                 continue
 
-            if isinstance(entry_time, str):
-                try:
+            try:
+                if isinstance(entry_time, str):
                     if "T" in entry_time:
                         entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
                     else:
                         entry_dt = datetime.strptime(entry_time, "%Y-%m-%d %H:%M")
-                except ValueError:
+                        entry_dt = entry_dt.replace(tzinfo=_tz.utc)
+                elif isinstance(entry_time, datetime):
+                    entry_dt = entry_time
+                else:
                     continue
-            elif isinstance(entry_time, datetime):
-                entry_dt = entry_time
-            else:
+
+                entry_utc = _to_utc(entry_dt)
+            except (ValueError, OverflowError, AttributeError):
                 continue
 
-            # Make both tz-aware or both tz-naive for comparison
-            try:
-                if entry_dt.tzinfo is None and target_time.tzinfo is not None:
-                    entry_dt = entry_dt.replace(tzinfo=target_time.tzinfo)
-                elif entry_dt.tzinfo is not None and target_time.tzinfo is None:
-                    entry_dt = entry_dt.replace(tzinfo=None)
-            except AttributeError:
-                pass
-
-            delta = abs((entry_dt - target_time).total_seconds())
+            delta = abs((entry_utc - target_utc).total_seconds())
             if delta < best_delta:
                 best_delta = delta
                 best_entry = entry
 
-        # Only use forecast data if it's within 2 hours of target (don't extrapolate far)
-        if best_entry is not None and best_delta < 7200:
+        # Only use forecast data if it's within 90 minutes of target (hourly forecast
+        # has entries every hour, so the closest should always be ≤30min away unless
+        # the forecast window is exhausted)
+        if best_entry is not None and best_delta < 5400:
             return {
                 "temperature": best_entry.get("temperature", 70.0),
                 "humidity": best_entry.get("humidity", 50.0),
