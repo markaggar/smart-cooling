@@ -244,58 +244,135 @@ class LearningModule:
             await self.record_actual(current_time, current_indoor_temp)
 
     async def compute_parameter_updates(self) -> dict[str, float] | None:
-        """Analyze errors and compute parameter adjustments.
-        
-        Uses simple gradient-based learning:
-        - If we consistently predict too hot, reduce heat gain params
-        - If we consistently predict too cold, increase heat gain params
-        - Similar logic for cooling rate params
-        
-        Returns updated parameters if changes warranted, None otherwise.
+        """Adjust physics parameters based on prediction errors, segmented by what was running.
+
+        Segments history into four modes:
+          - Passive (no AC, fan, or window): bias → base_heat_gain_rate
+          - Window only: bias → natural_cooling_effectiveness
+          - Fan (fan or fan+window): bias → fan_cooling_effectiveness
+          - AC: bias → ac_cooling_rate_mild / ac_cooling_rate_hot
+
+        Error sign convention: prediction_error = actual - predicted.
+          Positive → room ended up warmer than predicted.
+          Passive: warmer than expected → heat gain was underestimated → raise base_heat_gain_rate.
+          Cooling modes: warmer than expected → cooling was overestimated → lower the rate.
+
+        Returns updated parameters dict if any change was made, else None.
         """
-        # Need enough recent data with actuals
         records_with_actuals = [
-            r for r in self._historical_records[-100:]
-            if r.actual_temp is not None
+            r for r in self._historical_records[-200:]
+            if r.actual_temp is not None and r.prediction_error() is not None
         ]
-        
-        if len(records_with_actuals) < 20:
-            return None  # Not enough data
-        
-        # Calculate bias (systematic over/under prediction)
-        errors = [r.prediction_error() for r in records_with_actuals if r.prediction_error() is not None]
-        mean_error = sum(errors) / len(errors)
-        
-        # Only update if bias is significant (> 0.5°F)
-        if abs(mean_error) < 0.5:
+
+        if len(records_with_actuals) < 10:
             return None
-        
-        _LOGGER.info(
-            "Learning: mean prediction error is %.2f°F, adjusting parameters",
-            mean_error,
-        )
-        
-        # Start with current learned params
+
+        def _mean(recs: list) -> float:
+            errs = [r.prediction_error() for r in recs]
+            return sum(errs) / len(errs)  # type: ignore[arg-type]
+
         updated_params = dict(self._learned_params)
-        
-        # If we predict too cold (actual is hotter), increase heat gain
-        # If we predict too hot (actual is colder), decrease heat gain
-        adjustment = -mean_error * self.learning_rate
-        
-        # Apply adjustment to heat gain rate
-        current_heat_gain = updated_params.get(
-            "base_heat_gain_rate",
-            DEFAULT_PHYSICS_PARAMS["base_heat_gain_rate"],
-        )
-        new_heat_gain = current_heat_gain + adjustment
-        # Clamp to reasonable range
-        new_heat_gain = max(0.5, min(5.0, new_heat_gain))
-        updated_params["base_heat_gain_rate"] = round(new_heat_gain, 2)
-        
-        # Save and return
+        changed = False
+
+        # --- Passive: no cooling device was running ---
+        passive = [
+            r for r in records_with_actuals
+            if not r.conditions.get("ac_running")
+            and not r.conditions.get("fan_running")
+            and not r.conditions.get("window_open")
+        ]
+        if len(passive) >= 5:
+            me = _mean(passive)
+            if abs(me) >= 0.5:
+                # Positive error → actual warmer → heat gain was too low → raise
+                cur = updated_params.get("base_heat_gain_rate", DEFAULT_PHYSICS_PARAMS["base_heat_gain_rate"])
+                updated_params["base_heat_gain_rate"] = round(
+                    max(0.1, min(5.0, cur + me * self.learning_rate)), 3
+                )
+                changed = True
+                _LOGGER.info(
+                    "Learning (passive, n=%d): error %.2f°F → base_heat_gain_rate %.3f",
+                    len(passive), me, updated_params["base_heat_gain_rate"],
+                )
+
+        # --- Window (natural ventilation, no fan, no AC) ---
+        window_only = [
+            r for r in records_with_actuals
+            if not r.conditions.get("ac_running")
+            and not r.conditions.get("fan_running")
+            and r.conditions.get("window_open")
+        ]
+        if len(window_only) >= 3:
+            me = _mean(window_only)
+            if abs(me) >= 0.5:
+                # Positive error → natural cooling delivered less than modeled → lower effectiveness
+                cur = updated_params.get("natural_cooling_effectiveness", DEFAULT_PHYSICS_PARAMS["natural_cooling_effectiveness"])
+                updated_params["natural_cooling_effectiveness"] = round(
+                    max(0.01, min(1.0, cur - me * self.learning_rate * 0.05)), 4
+                )
+                changed = True
+                _LOGGER.info(
+                    "Learning (window, n=%d): error %.2f°F → natural_cooling_effectiveness %.4f",
+                    len(window_only), me, updated_params["natural_cooling_effectiveness"],
+                )
+
+        # --- Fan (fan on, with or without window, no AC) ---
+        fan_recs = [
+            r for r in records_with_actuals
+            if not r.conditions.get("ac_running")
+            and r.conditions.get("fan_running")
+        ]
+        if len(fan_recs) >= 3:
+            me = _mean(fan_recs)
+            if abs(me) >= 0.5:
+                # Positive error → fan delivered less cooling than modeled → lower effectiveness
+                cur = updated_params.get("fan_cooling_effectiveness", DEFAULT_PHYSICS_PARAMS["fan_cooling_effectiveness"])
+                updated_params["fan_cooling_effectiveness"] = round(
+                    max(0.01, min(1.0, cur - me * self.learning_rate * 0.05)), 4
+                )
+                changed = True
+                _LOGGER.info(
+                    "Learning (fan, n=%d): error %.2f°F → fan_cooling_effectiveness %.4f",
+                    len(fan_recs), me, updated_params["fan_cooling_effectiveness"],
+                )
+
+        # --- AC: split by outdoor temp at prediction time ---
+        ac_recs = [r for r in records_with_actuals if r.conditions.get("ac_running")]
+        ac_mild = [r for r in ac_recs if float(r.conditions.get("outdoor_temp", 80)) < 82]
+        ac_hot  = [r for r in ac_recs if float(r.conditions.get("outdoor_temp", 80)) >= 82]
+
+        if len(ac_mild) >= 3:
+            me = _mean(ac_mild)
+            if abs(me) >= 0.5:
+                # Positive error → AC delivered less cooling → lower rate
+                cur = updated_params.get("ac_cooling_rate_mild", DEFAULT_PHYSICS_PARAMS["ac_cooling_rate_mild"])
+                updated_params["ac_cooling_rate_mild"] = round(
+                    max(0.5, min(15.0, cur - me * self.learning_rate)), 3
+                )
+                changed = True
+                _LOGGER.info(
+                    "Learning (AC mild, n=%d): error %.2f°F → ac_cooling_rate_mild %.3f",
+                    len(ac_mild), me, updated_params["ac_cooling_rate_mild"],
+                )
+
+        if len(ac_hot) >= 3:
+            me = _mean(ac_hot)
+            if abs(me) >= 0.5:
+                cur = updated_params.get("ac_cooling_rate_hot", DEFAULT_PHYSICS_PARAMS["ac_cooling_rate_hot"])
+                updated_params["ac_cooling_rate_hot"] = round(
+                    max(0.5, min(15.0, cur - me * self.learning_rate)), 3
+                )
+                changed = True
+                _LOGGER.info(
+                    "Learning (AC hot, n=%d): error %.2f°F → ac_cooling_rate_hot %.3f",
+                    len(ac_hot), me, updated_params["ac_cooling_rate_hot"],
+                )
+
+        if not changed:
+            return None
+
         self._learned_params = updated_params
         self._save_state()
-        
         return updated_params
 
     # --- Historical Data Import for Testing ---

@@ -157,22 +157,24 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return []
 
     def _get_current_wind_speed(self, forecast: list[dict[str, Any]]) -> float:
-        """Extract current wind speed from hourly forecast.
-        
-        Wind speed is included as an attribute in each forecast array item.
-        Returns the wind_speed from the first (current hour) forecast item.
-        """
+        """Extract current wind speed from the first hourly forecast item."""
         if not forecast:
             return 0.0
-        
-        # Get wind_speed from the first forecast item (current/next hour)
         first_forecast = forecast[0] if forecast else {}
-        wind_speed = first_forecast.get("wind_speed", 0)
-        
         try:
-            return float(wind_speed)
+            return float(first_forecast.get("wind_speed", 0))
         except (ValueError, TypeError):
             return 0.0
+
+    def _get_current_outdoor_humidity(self, forecast: list[dict[str, Any]]) -> float:
+        """Extract current outdoor humidity from the first hourly forecast item."""
+        if not forecast:
+            return 50.0
+        first_forecast = forecast[0] if forecast else {}
+        try:
+            return float(first_forecast.get("humidity", 50.0))
+        except (ValueError, TypeError):
+            return 50.0
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from sensors and compute recommendations."""
@@ -180,7 +182,8 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Get hourly forecast (includes wind_speed per forecast item)
             forecast = await self._get_hourly_forecast()
             current_wind_speed = self._get_current_wind_speed(forecast)
-            
+            current_outdoor_humidity = self._get_current_outdoor_humidity(forecast)
+
             # Gather current conditions for this room
             current_conditions = {
                 "room_name": self.room_name,
@@ -193,6 +196,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "outdoor_temp": self._get_sensor_value(
                     self.config.get(CONF_OUTDOOR_TEMP_SENSOR), 70.0
                 ),
+                "outdoor_humidity": current_outdoor_humidity,
                 "aqi": self._get_sensor_value(
                     self.config.get(CONF_AQI_SENSOR), 50.0
                 ),

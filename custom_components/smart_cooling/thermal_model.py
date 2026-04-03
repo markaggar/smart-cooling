@@ -87,20 +87,26 @@ class ThermalModel:
         return total_gain
 
     def calculate_fan_cooling_rate(
-        self, outdoor_temp: float, indoor_temp: float, wind_speed: float = 0.0
+        self,
+        outdoor_temp: float,
+        indoor_temp: float,
+        wind_speed: float = 0.0,
+        outdoor_humidity: float = 50.0,
     ) -> float:
         """Calculate cooling rate when using window fan.
-        
+
+        outdoor_humidity (0-100 %RH) reduces effectiveness — humid air transfers
+        less heat via convection and offers no evaporative benefit.
         Returns cooling rate in °F/hr (positive = degrees of cooling per hour).
         """
         temp_differential = indoor_temp - outdoor_temp
-        
+
         if temp_differential <= 0:
             # Can't cool if outdoor is warmer
             return 0.0
-        
+
         base_effectiveness = self.params["fan_cooling_effectiveness"]
-        
+
         # Effectiveness scales with temperature differential
         if temp_differential > 10:
             effectiveness_multiplier = 1.0
@@ -112,18 +118,23 @@ class ThermalModel:
             effectiveness_multiplier = 0.2
         else:
             effectiveness_multiplier = 0.0
-        
+
         # Wind boost
         effective_wind = max(wind_speed, self.params["fan_equivalent_wind_speed"])
         wind_factor = effective_wind / 10.0  # Normalize to ~1 at 10 mph
+
+        # Humidity penalty: high outdoor humidity reduces convective cooling.
+        # At 40% RH → factor=1.0; at 90% RH → factor=0.75; clamped at 0.5.
+        humidity_factor = max(0.5, 1.0 - max(outdoor_humidity - 40.0, 0.0) * 0.005)
         
         cooling_rate = (
-            temp_differential 
-            * base_effectiveness 
-            * effectiveness_multiplier 
+            temp_differential
+            * base_effectiveness
+            * effectiveness_multiplier
             * wind_factor
+            * humidity_factor
         )
-        
+
         return max(cooling_rate, 0.0)
 
     def calculate_ac_cooling_rate(self, outdoor_temp: float) -> float:
@@ -184,9 +195,13 @@ class ThermalModel:
             
             # Apply cooling if strategy specified
             cooling = 0.0
+            hour_humidity = forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0))
             if cooling_strategy == "fan":
+                hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 0.0))
                 cooling = self.calculate_fan_cooling_rate(
-                    hour_outdoor_temp, simulated_temp
+                    hour_outdoor_temp, simulated_temp,
+                    wind_speed=float(hour_wind),
+                    outdoor_humidity=float(hour_humidity),
                 )
             elif cooling_strategy == "ac":
                 cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
@@ -195,13 +210,15 @@ class ThermalModel:
                 # temperature differential and wind, but less effective than a fan
                 temp_diff = simulated_temp - hour_outdoor_temp
                 if temp_diff > 0:
-                    wind_data = self._get_forecast_for_hour(forecast, future_time)
-                    hour_wind = wind_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
+                    hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
                     wind_factor = max(float(hour_wind), 1.0) / 10.0
+                    # Same humidity penalty as fan cooling
+                    humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
                     cooling = (
                         temp_diff
                         * self.params["natural_cooling_effectiveness"]
                         * wind_factor
+                        * humidity_factor
                     )
             
             # Net temperature change
@@ -284,20 +301,27 @@ class ThermalModel:
             )
 
             cooling = 0.0
+            hour_humidity = forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0))
             if cooling_strategy == "fan":
-                cooling = self.calculate_fan_cooling_rate(hour_outdoor_temp, simulated_temp)
+                hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 0.0))
+                cooling = self.calculate_fan_cooling_rate(
+                    hour_outdoor_temp, simulated_temp,
+                    wind_speed=float(hour_wind),
+                    outdoor_humidity=float(hour_humidity),
+                )
             elif cooling_strategy == "ac":
                 cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
             elif cooling_strategy == "natural":
                 temp_diff = simulated_temp - hour_outdoor_temp
                 if temp_diff > 0:
-                    wind_data = self._get_forecast_for_hour(forecast, future_time)
-                    hour_wind = wind_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
+                    hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
                     wind_factor = max(float(hour_wind), 1.0) / 10.0
+                    humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
                     cooling = (
                         temp_diff
                         * self.params["natural_cooling_effectiveness"]
                         * wind_factor
+                        * humidity_factor
                     )
 
             if simulated_temp <= target_temp:
