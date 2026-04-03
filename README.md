@@ -1,181 +1,296 @@
-# Smart Cooling Integration for Home Assistant
+# Smart Cooling
 
-A self-learning smart cooling integration that predicts indoor temperatures and recommends optimal cooling strategies (window, fan, or AC) to reach your target bedtime temperature.
+A Home Assistant custom integration that predicts whether your room will reach a target temperature (e.g., bedtime comfort) using hourly weather forecast data and a self-learning physics model. It recommends the least-energy method — natural ventilation, fan, or AC — and tells you exactly when to act.
+
+---
 
 ## Features
 
-- **Physics-based thermal modeling** - Predicts indoor temperature evolution based on outdoor conditions, solar gain, and thermal transfer
-- **Multi-strategy optimization** - Evaluates natural cooling, fan cooling, and AC to recommend the most energy-efficient option
-- **Self-learning** - Automatically adjusts physics parameters based on prediction accuracy over time
-- **Historical data replay** - Test and tune the model using historical sensor data from spreadsheets
+- **Hourly forecast-aware predictions** — simulates indoor temperature hour-by-hour using your weather entity's forecast, not just current outdoor temp
+- **Physics-based thermal model** — accounts for wall insulation, solar gain, passive ventilation, fan, and AC cooling rates
+- **Energy-efficient strategy selection** — prefers open window → fan → AC, escalating only when needed
+- **Adaptive learning** — tracks prediction accuracy over time and builds confidence score
+- **Tolerance-aware scheduling** — gives lower-energy methods extra time before escalating to AC
+- **8 sensors per room** — recommendation, predicted temp, deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning
+
+---
+
+## Requirements
+
+- Home Assistant 2024.1 or later
+- A weather entity that supports `weather.get_forecasts` with hourly data (e.g., `weather.home` from the Met.no or Open-Meteo integrations)
+- An indoor temperature sensor for each room
+
+---
 
 ## Installation
 
-### HACS (Coming Soon)
-
-This integration will be available through HACS once stable.
-
-### Manual Installation
-
-1. Copy the `custom_components/smart_cooling` folder to your Home Assistant `config/custom_components/` directory
+1. Copy the `custom_components/smart_cooling` folder into your HA `config/custom_components/` directory
 2. Restart Home Assistant
-3. Add the integration through the UI: Settings → Devices & Services → Add Integration → Smart Cooling
+3. Go to **Settings → Devices & Services → Add Integration** and search for **Smart Cooling**
+4. Complete the setup wizard (see [Configuration](#configuration))
+
+---
 
 ## Configuration
 
-The integration requires:
+Setup is a 4-step wizard. The global settings (Step 1) only appear once for your first room; additional rooms reuse them.
 
-**Required Sensors:**
-- Indoor temperature sensor (bedroom)
-- Outdoor temperature sensor
+### Step 1 — Global Settings *(first room only)*
 
-**Optional Sensors:**
-- Indoor humidity sensor
-- Air Quality Index (AQI) sensor
-- Wind speed sensor
-- Weather entity (for forecasts)
+| Field | Required | Description |
+|---|---|---|
+| Weather entity | ✓ | Hourly forecast source. Must support `weather.get_forecasts` with `type: hourly`. Provides temperature, wind speed, humidity, and condition per hour. |
+| Outdoor temperature sensor | ✓ | Current outdoor temperature sensor |
+| AQI sensor | — | Air Quality Index sensor. When AQI > 150, window/fan options are suppressed. |
 
-**Optional Device State Sensors:**
-- Window open/closed binary sensor
-- Window fan on/off binary sensor
-- AC on/off binary sensor
+### Step 2 — Room Identity & Sensors
 
-**Optional Target Entities:**
-- Target temperature input_number
-- Bedtime input_datetime
+| Field | Required | Description |
+|---|---|---|
+| Room name | ✓ | Unique display name used in entity IDs (e.g., `master_bedroom`) |
+| Indoor temperature sensor | ✓ | Primary temperature sensor for this room |
+| Indoor humidity sensor | — | Optional; used for future comfort calculations |
 
-## Sensors Created
+### Step 3 — Device State Sensors
 
-| Sensor | Description |
-|--------|-------------|
-| `sensor.smart_cooling_recommendation` | Current cooling recommendation (e.g., "Start fan NOW!") |
-| `sensor.smart_cooling_predicted_bedtime_temp` | Predicted temperature at bedtime |
-| `sensor.smart_cooling_cooling_deficit` | Degrees above target (cooling needed) |
-| `sensor.smart_cooling_prediction_confidence` | Model confidence based on learning |
+These tell the integration what is currently running so recommendations say "keep open" instead of "open":
 
-## Development
+| Field | Description |
+|---|---|
+| Window sensor | Binary sensor — is the window open? |
+| Fan sensor | Binary sensor — is the fan running? |
+| AC sensor | Binary sensor — is the AC running? |
 
-### Prerequisites
+### Step 4 — Targets & Behavior
 
-- Python 3.11+
-- Home Assistant development environment (optional for full testing)
+| Field | Default | Range | Description |
+|---|---|---|---|
+| Target temperature entity | — | — | `input_number` helper holding the desired temperature to reach |
+| Target time entity | 22:30 | — | `input_datetime` helper for the deadline (e.g., bedtime) |
+| Tolerance minutes | 30 | 0–120 min | Extra grace window for lower-energy methods; see [Tolerance](#tolerance) |
+| Enable learning | On | — | Whether the model adapts from actual outcomes |
 
-### Setup
+All options except room name are editable after setup via **Settings → Devices & Services → Smart Cooling → Configure**.
 
-```bash
-cd smart-cooling
-python -m venv venv
-venv\Scripts\activate  # Windows
-pip install -r requirements_dev.txt
+---
+
+## Sensors
+
+Each room creates 8 sensors with IDs following the pattern `sensor.smart_cooling_{room_name}_{key}`:
+
+| Sensor | What it shows |
+|---|---|
+| `recommendation` | Human-readable action, e.g. *"Open window now"* or *"Start AC — target may not be reached"* |
+| `predicted_target_temp` | Predicted °F the room will be at the target time under the current strategy. Attributes include `hourly_predictions`, `forecast_entries`, `forecast_sample`, and `physics_params`. |
+| `cooling_deficit` | Degrees above target the room is predicted to be at the deadline. Negative = room will overshoot (good). |
+| `prediction_confidence` | 0–100% accuracy confidence based on past predictions. Below 10 validated predictions, shows 50%. See [Confidence](#prediction-confidence). |
+| `time_to_target` | Hours remaining until the target time |
+| `will_reach_target_at` | Datetime when the room is predicted to reach the target temperature. `Unknown` if already there. |
+| `action_needed_by` | Latest datetime to start the recommended action and still meet the deadline. `Unknown` if no action is needed. Attributes include `overdue` and `minutes_remaining`. |
+| `reasoning` | Plain-English explanation of why this strategy was chosen. Full text in `full_reasoning` attribute. |
+
+### Predicted Temperature Attributes
+
+The `predicted_target_temp` sensor attributes are useful for debugging:
+
+```yaml
+hourly_predictions:
+  - hour: 17
+    time: '2026-04-02T17:49:59-07:00'
+    predicted_temp: 70.6
+    outdoor_temp: 53
+    heat_gain: -1.4
+    cooling: 0
+    net_change: -1.4
+  # ... one entry per simulated hour
+forecast_entries: 168        # total hourly forecast points loaded
+forecast_sample:             # first 4 forecast points (UTC)
+  - datetime: '2026-04-03T00:00:00+00:00'
+    temperature: 53
+physics_params:              # current model parameters for this room
+  base_heat_gain_rate: 0.5
+  thermal_transfer_coefficient: 0.1
+  # ...
 ```
 
-### Running Tests
+---
 
-```bash
-# Run all tests
-pytest tests/ -v
+## How It Works
 
-# Run with coverage
-pytest tests/ -v --cov=custom_components/smart_cooling
+### Thermal Model
 
-# Run specific test file
-pytest tests/test_thermal_model.py -v
+Every update cycle, the model simulates the room temperature hour-by-hour from now until the target time. For each hour it:
+
+1. Looks up the outdoor temperature from the **hourly weather forecast** (matched within 90 minutes)
+2. Computes heat exchange through walls: `thermal_transfer_coefficient × (outdoor − indoor)`
+3. Adds `base_heat_gain_rate` for internal heat sources
+4. Adds solar gain if it is peak hours (noon–6 PM)
+5. Subtracts cooling from the active strategy (natural ventilation, fan, or AC)
+
+The simulation produces a predicted indoor temperature at the target time and an `hours_to_cool` estimate for each strategy evaluated.
+
+### Strategy Selection
+
+The engine evaluates three methods in energy-efficiency order and picks the first one that can reach the target within `target_time + tolerance`:
+
+1. **Natural ventilation** (open window) — evaluated if AQI ≤ 150
+2. **Fan** — evaluated if AQI ≤ 150
+3. **AC** — always evaluated as fallback
+
+If no method can reach the target, AC is selected but the recommendation is labeled *"LATE — target may not be reached"*.
+
+The recommendation text reflects what is already running:
+
+| State | Recommendation |
+|---|---|
+| Window recommended, window closed | *Open window* |
+| Window recommended, window open | *Keep window open* |
+| Fan recommended, fan off | *Start fan* |
+| Fan recommended, fan running | *Continue fan* |
+| AC recommended, AC off | *Start AC* |
+| AC recommended, AC running | *Continue AC* |
+| Already at/near target | *No action needed* |
+
+### Tolerance
+
+`tolerance_minutes` (default **30**) gives lower-energy methods a grace window before escalating. For example, if AC would reach 69°F by 10:00 PM but a fan would reach it by 10:25 PM, and tolerance is 30 minutes, the fan is chosen.
+
+| Tolerance | Effect |
+|---|---|
+| 0 min | Must hit target exactly on time; fan chosen only if as fast as AC |
+| 30 min | Fan gets a 30-minute grace window |
+| 120 min | Window/fan given 2 hours; AC used only if they truly cannot get there |
+
+### Prediction Confidence
+
+Confidence is built from validated predictions — cases where a prediction was made and the actual temperature at the target time was later recorded.
+
+- **< 10 validated predictions** → **50%** (baseline; no track record yet)
+- **10+ predictions** → `max(30%, 100% − (MAE ÷ 7°F) × 100%)`
+
+| Mean Absolute Error | Confidence |
+|---|---|
+| 0°F | 100% |
+| 1.4°F | ~80% |
+| 3.5°F | ~50% |
+| ≥ 4.9°F | 30% (floor) |
+
+Confidence accumulates automatically — every night after the target time passes, the actual reading is recorded and the model is scored. After a week or two of normal use it has a meaningful value.
+
+---
+
+## Physics Parameters
+
+These control the thermal model and are stored per-room in `.storage/smart_cooling/`. Defaults work for most bedrooms; calibrate or tune manually if predictions are consistently off.
+
+| Parameter | Default | Unit | When to adjust |
+|---|---|---|---|
+| `base_heat_gain_rate` | 0.5 | °F/hr | Raise if room heats faster than predicted when outdoor ≈ indoor (many appliances, occupied room) |
+| `thermal_transfer_coefficient` | 0.1 | °F/hr per °F differential | Raise for poorly insulated rooms; lower for well-insulated. 0.05 = very good, 0.3 = poor |
+| `solar_gain_factor` | 0.6 | multiplier | Raise for south/west-facing rooms with many windows |
+| `ac_cooling_rate_mild` | 4.5 | °F/hr | Adjust if AC reaches target faster/slower on mild days (outdoor < 82°F) |
+| `ac_cooling_rate_hot` | 2.5 | °F/hr | Adjust for hot days (outdoor ≥ 82°F) |
+| `natural_cooling_effectiveness` | 0.05 | coefficient | The passive airflow bonus from opening windows, on top of wall conduction. Range 0.2–0.5 for a breezy room. |
+| `fan_cooling_effectiveness` | 0.15 | coefficient | Raise if fan is more effective than predicted |
+| `fan_equivalent_wind_speed` | 8.0 | mph | Effective wind speed assumed for fan on calm nights |
+
+> **Note:** `base_heat_gain_rate` defaults only apply to new rooms. If a room was set up before this was changed, update it via `smart_cooling.set_params` or `smart_cooling.calibrate`.
+
+---
+
+## Services
+
+### `smart_cooling.set_params`
+
+Manually override physics parameters for a room. Changes persist across restarts and take effect immediately.
+
+```yaml
+service: smart_cooling.set_params
+data:
+  entry_id: "abc123"                    # required
+  base_heat_gain_rate: 0.5              # optional — omit to leave unchanged
+  thermal_transfer_coefficient: 0.1
+  solar_gain_factor: 0.6
+  ac_cooling_rate_mild: 4.5
+  ac_cooling_rate_hot: 2.5
+  natural_cooling_effectiveness: 0.35
+  fan_cooling_effectiveness: 0.15
 ```
 
-### Testing with Historical Data
+Find `entry_id` in the URL when you click the integration in **Settings → Devices & Services → Smart Cooling**.
 
-The integration includes a historical replay system for testing without live sensors:
+### `smart_cooling.calibrate`
 
-```python
-from custom_components.smart_cooling.historical_replay import (
-    HistoricalDataLoader,
-    HistoricalReplayEngine,
-    generate_synthetic_data,
-)
-from custom_components.smart_cooling.thermal_model import ThermalModel
-from custom_components.smart_cooling.strategy_engine import StrategyEngine
+Reads historical sensor data from the HA recorder and auto-tunes parameters using regression. No CSV export needed.
 
-# Option 1: Load from Excel (your historical data)
-loader = HistoricalDataLoader()
-data = loader.load_from_excel(
-    "summer_2025_data.xlsx",
-    column_mapping={
-        "timestamp": "datetime",
-        "indoor_temp": "bedroom_temp",
-        "outdoor_temp": "outside_temp",
-    }
-)
-
-# Option 2: Generate synthetic data for testing
-data = generate_synthetic_data(
-    start_time=datetime(2024, 7, 15, 6, 0),
-    hours=48,
-    scenario="hot_day",  # or "cool_day", "mild_day"
-)
-
-# Replay through model
-model = ThermalModel(config={})
-strategy = StrategyEngine(model)
-replay = HistoricalReplayEngine(model, strategy)
-
-results = replay.replay_data(data, prediction_horizon_hours=4.0)
-metrics = replay.calculate_metrics(results)
-
-print(f"Mean Absolute Error: {metrics['mean_absolute_error']:.2f}°F")
-print(f"Prediction Bias: {metrics['mean_error']:.2f}°F")
+```yaml
+service: smart_cooling.calibrate
+data:
+  entry_id: "abc123"   # required
+  days: 30             # optional, default 30, range 1–365
 ```
 
-### Deployment to HA Dev
+Results and parameter changes are logged at INFO level. Requires at least a few days of history with varying indoor/outdoor temperature conditions.
 
-The project uses GitHub Actions to automatically deploy to your development Home Assistant instance.
+---
 
-**Setup GitHub Secrets:**
+## Tuning Guide
 
-| Secret | Description |
-|--------|-------------|
-| `HA_DEV_HOST` | Hostname/IP of your HA Dev instance |
-| `HA_DEV_TOKEN` | Long-lived access token for HA API |
-| `HA_DEV_SSH_KEY` | SSH private key for rsync deployment |
+### Predictions run too warm (room cools faster than predicted)
+Lower `base_heat_gain_rate` or raise `thermal_transfer_coefficient`.
 
-**Manual Deployment:**
+### Predictions run too cool (room stays warmer than predicted)
+Raise `base_heat_gain_rate` or lower `thermal_transfer_coefficient`.
 
-```bash
-# Copy to HA Dev
-rsync -avz custom_components/smart_cooling/ user@ha-dev:/config/custom_components/smart_cooling/
+### Fan/window never chosen
+Increase `tolerance_minutes` (try 60 or 90) to give lower-energy methods more time.
 
-# Restart HA (via API)
-curl -X POST -H "Authorization: Bearer $TOKEN" http://ha-dev:8123/api/services/homeassistant/restart
+### AC takes too long or too short
+Adjust `ac_cooling_rate_mild` and `ac_cooling_rate_hot` to match observed performance.
+
+### Natural ventilation seems underrated
+Raise `natural_cooling_effectiveness` (try 0.3–0.5). The default is conservative — it represents only the passive airflow bonus on top of wall conduction, which already handles most cooling when outdoor air is much cooler than indoor.
+
+### Confidence stuck at 50%
+Normal for the first week or two. The model needs at least 10 nights where the target time passes and the actual temperature is recorded.
+
+---
+
+## Troubleshooting
+
+### `forecast_entries` is 0
+The weather entity is not returning hourly forecast data. Verify it supports `weather.get_forecasts` with `type: hourly`.
+
+### All hourly predictions show the same `outdoor_temp`
+The forecast lookup is failing. Check that your weather entity's forecast datetimes are in UTC (ISO 8601 with `+00:00`).
+
+### `action_needed_by` shows a time when no action is needed
+Update to the latest version — fixed so `action_needed_by` returns `Unknown` when strategy is `no_action`.
+
+### `will_reach_target_at` ticks to "now" every minute
+Update to the latest version — fixed so it returns `Unknown` when the room is already at or below target.
+
+---
+
+## Architecture
+
+```
+coordinator.py          — DataUpdateCoordinator; orchestrates each update cycle
+│
+├── thermal_model.py    — Hour-by-hour temperature simulation + forecast lookup
+├── strategy_engine.py  — Cooling method selection with tolerance awareness
+├── learning_module.py  — Prediction recording, scoring, and confidence calculation
+├── calibration.py      — OLS regression to estimate params from historical data
+│
+sensor.py               — 8 HA sensor entities per room
+config_flow.py          — 4-step setup wizard + options flow
+__init__.py             — Integration setup, service registration
+const.py                — Default physics params, domain constants
 ```
 
-## Learning System
-
-The integration learns from its prediction accuracy:
-
-1. **Records Predictions** - Each recommendation records the predicted bedtime temperature
-2. **Records Actuals** - At bedtime, the actual temperature is recorded
-3. **Compares & Learns** - If predictions are consistently off, physics parameters are adjusted
-4. **Persists Knowledge** - Learned parameters are saved and survive restarts
-
-Learned parameters include:
-- `base_heat_gain_rate` - How fast the house gains heat
-- `thermal_transfer_coefficient` - Heat transfer through walls
-- `fan_cooling_effectiveness` - How effective fan cooling is
-- `ac_cooling_rate_mild` / `ac_cooling_rate_hot` - AC effectiveness at different outdoor temps
-
-## Roadmap
-
-- [ ] Initial release with thermal model and strategy engine
-- [ ] Historical data import from spreadsheets
-- [ ] Learning system validation with real data
-- [ ] Automated bedtime actual recording
-- [ ] HACS submission
-- [ ] Multiple room support
-- [ ] Integration with AC/fan automations
-
-## Contributing
-
-Contributions are welcome! Please open an issue or PR.
+---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE)
+MIT

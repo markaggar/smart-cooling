@@ -15,7 +15,7 @@ set_params:
         text:
     base_heat_gain_rate:
       name: Base heat gain rate (°F/hr)
-      description: Passive heat gain when no sun and outdoor temp equals indoor temp. Default 2.2. Raise if room heats faster than predicted; lower if predictions run too hot.
+      description: Passive heat gain when no sun and outdoor temp equals indoor temp. Default 0.5. Raise if room heats faster than predicted; lower if predictions run too hot.
       required: false
       selector:
         number:
