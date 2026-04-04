@@ -305,7 +305,14 @@ class SmartCoolingReasoningSensor(SmartCoolingBaseSensor):
             return None
         # HA states truncate at 255 chars; put full text in attributes
         text = strategy.reasoning
-        return text[:255] if len(text) > 255 else text
+        if len(text) <= 255:
+            return text
+        # Trim at the last sentence boundary that fits within 255 chars
+        trimmed = text[:254]
+        last_period = trimmed.rfind(". ")
+        if last_period > 60:
+            return text[: last_period + 1]
+        return trimmed + "…"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

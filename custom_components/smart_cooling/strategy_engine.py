@@ -380,18 +380,24 @@ class StrategyEngine:
         current_time: datetime = conditions.get("current_time", datetime.now())
         hours_to_cool = strategy.get("hours_to_cool")
         achieves = strategy.get("achieves_target", False)
-
-        parts: list[str] = []
-
-        # --- What the room needs ---
         deficit = indoor_temp - target_temp
         h = int(hours_to_target)
         m = int((hours_to_target - h) * 60)
         time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
-        parts.append(
-            f"Room is {indoor_temp:.1f}°F, needs to reach {target_temp:.1f}°F "
-            f"({deficit:.1f}°F drop) in {time_str}"
-        )
+
+        parts: list[str] = []
+
+        # --- Extreme conditions note (>15°F gap is a large task) ---
+        if deficit > 15:
+            parts.append(
+                f"Room is very hot ({indoor_temp:.0f}°F) — "
+                f"cooling {deficit:.0f}°F in {time_str} is a large task"
+            )
+        else:
+            parts.append(
+                f"Room is {indoor_temp:.1f}°F, needs to reach {target_temp:.1f}°F "
+                f"({deficit:.1f}°F drop) in {time_str}"
+            )
 
         # --- Forecast trajectory ---
         # Pull outdoor temps from forecast over the prediction window
@@ -538,17 +544,20 @@ class StrategyEngine:
                 if fan_strategy:
                     fan_h = fan_strategy.get("hours_to_cool")
                     if fan_h is None:
-                        # Check if forecast temps ever get below target
+                        # After the step-hours fix, None means genuinely can't reach in 24h
                         if forecast_temps and min(forecast_temps) >= target_temp:
                             parts.append(
                                 f"Outdoor air ({min(forecast_temps):.0f}°F min forecast) "
                                 f"won't drop below target — fan/window cannot cool the room"
                             )
                         else:
-                            parts.append("Fan cannot cool the room to target within 24 hours")
+                            parts.append(
+                                f"Fan cannot cool the room to {target_temp:.0f}°F "
+                                f"within 24 hours given current conditions"
+                            )
                     elif not fan_strategy.get("achieves_target"):
                         parts.append(
-                            f"Fan would take {fan_h:.1f}h, which exceeds the "
+                            f"Fan would take {_cool_time_str(fan_h)}, which exceeds the "
                             f"{tolerance_minutes}-minute tolerance — AC required"
                         )
             if hours_to_cool is not None:
@@ -557,14 +566,27 @@ class StrategyEngine:
                 if forecast_temps and min(forecast_temps) >= target_temp:
                     parts.append(
                         f"Forecast low is {min(forecast_temps):.0f}°F — outdoor air stays "
-                        f"above target all night, even AC may struggle"
+                        f"above target, even AC may struggle"
+                    )
+                else:
+                    parts.append(
+                        f"AC cannot cool {indoor_temp:.0f}°F → {target_temp:.0f}°F "
+                        f"({indoor_temp - target_temp:.0f}°F) within the available time"
                     )
 
         # --- Late warning ---
         if not achieves:
+            # When outdoor is much colder than indoor and AQI is OK, opening windows
+            # alongside AC gives free supplemental cooling
+            outdoor_advantage = indoor_temp - outdoor_temp
+            if aqi_ok and outdoor_advantage >= 8 and not window_open:
+                parts.append(
+                    f"Opening windows (outside is {outdoor_advantage:.0f}°F cooler) "
+                    f"alongside AC will significantly speed up cooling"
+                )
             parts.append(
                 "Target may not be reached by the deadline — "
-                "consider starting earlier or using AC"
+                "start AC earlier next time or lower the target temperature"
             )
 
         return ". ".join(parts) + "."

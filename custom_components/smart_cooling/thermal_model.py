@@ -324,9 +324,12 @@ class ThermalModel:
                         * humidity_factor
                     )
 
+            # Apply fractional step (rates are per-hour; step is 0.25h)
+            net_change = heat_gain - cooling
+            simulated_temp += net_change * step_hours
+
             if simulated_temp <= target_temp:
-                # Interpolate back to precise crossing point
-                return round(elapsed_hours, 2)
+                return round(elapsed_hours + step_hours, 2)
 
         return None  # Not reachable within max_hours
 
