@@ -26,6 +26,8 @@ from .const import (
     CONF_FAN_SENSOR,
     CONF_AC_SENSOR,
     CONF_WINDOW_FACING,
+    CONF_FAN_AVAILABLE,
+    CONF_AC_AVAILABLE,
     CONF_TARGET_TEMP_ENTITY,
     CONF_TARGET_TIME_ENTITY,
     CONF_BEDTIME_ENTITY,  # Legacy support
@@ -277,6 +279,8 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ac_running": self._get_binary_state(
                     self.config.get(CONF_AC_SENSOR)
                 ),
+                "fan_available": bool(self.config.get(CONF_FAN_AVAILABLE, True)),
+                "ac_available": bool(self.config.get(CONF_AC_AVAILABLE, True)),
                 "current_time": dt_util.now(),
                 "forecast": forecast,
             }

@@ -53,6 +53,13 @@ WINDOW_DIRECTION_DEGREES: Final = {
     "S": 180, "SW": 225, "W": 270, "NW": 315,
 }
 
+# Device availability — per-room flags controlling which strategies are evaluated
+# Set to False to exclude that method from recommendations entirely.
+# If AC is unavailable, the integration only recommends window/natural ventilation
+# and warns about predicted peak temperature when cooling is insufficient.
+CONF_FAN_AVAILABLE: Final = "fan_available"
+CONF_AC_AVAILABLE: Final = "ac_available"
+
 # Target helpers for this room
 # Target temperature: input_number helper (e.g., input_number.bedroom_target_temp)
 CONF_TARGET_TEMP_ENTITY: Final = "target_temp_entity"

@@ -27,6 +27,8 @@ from .const import (
     CONF_AC_SENSOR,
     CONF_WINDOW_FACING,
     WINDOW_DIRECTION_OPTIONS,
+    CONF_FAN_AVAILABLE,
+    CONF_AC_AVAILABLE,
     CONF_TARGET_TEMP_ENTITY,
     CONF_TARGET_TIME_ENTITY,
     CONF_LEARNING_ENABLED,
@@ -92,6 +94,8 @@ STEP_ROOM_DEVICES_SCHEMA = vol.Schema(
                 mode=selector.SelectSelectorMode.LIST,
             ),
         ),
+        vol.Optional(CONF_FAN_AVAILABLE, default=True): selector.BooleanSelector(),
+        vol.Optional(CONF_AC_AVAILABLE, default=True): selector.BooleanSelector(),
     }
 )
 
@@ -339,6 +343,14 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
                 mode=selector.SelectSelectorMode.LIST,
             ),
         )
+        schema_dict[vol.Optional(
+            CONF_FAN_AVAILABLE,
+            default=current.get(CONF_FAN_AVAILABLE, True),
+        )] = selector.BooleanSelector()
+        schema_dict[vol.Optional(
+            CONF_AC_AVAILABLE,
+            default=current.get(CONF_AC_AVAILABLE, True),
+        )] = selector.BooleanSelector()
         schema_dict[vol.Optional(
             CONF_TARGET_TEMP_ENTITY,
             description={"suggested_value": current.get(CONF_TARGET_TEMP_ENTITY)},

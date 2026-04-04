@@ -105,6 +105,10 @@ class StrategyEngine:
         window_open = current_conditions.get("window_open", False)
         fan_running = current_conditions.get("fan_running", False)
         ac_running = current_conditions.get("ac_running", False)
+
+        # Device availability — per-room config flags
+        fan_available = current_conditions.get("fan_available", True)
+        ac_available = current_conditions.get("ac_available", True)
         
         cooling_deficit = prediction.cooling_deficit
         hours_to_target = self._hours_from_conditions(current_conditions)
@@ -172,7 +176,7 @@ class StrategyEngine:
             })
 
         # Evaluate fan cooling
-        if aqi_ok:
+        if aqi_ok and fan_available:
             fan_h = self.thermal_model.find_hours_to_cool_to_target(
                 current_conditions, "fan",
             )
@@ -191,24 +195,25 @@ class StrategyEngine:
                 "achieves_target": fan_within_tolerance,
             })
 
-        # Evaluate AC cooling (always available as fallback)
-        ac_h = self.thermal_model.find_hours_to_cool_to_target(
-            current_conditions, "ac",
-        )
-        ac_within_tolerance = (
-            ac_h is not None and ac_h <= (hours_to_target + tolerance_hours)
-        )
-        ac_prediction = self.thermal_model.predict_temperature(
-            current_conditions=current_conditions,
-            hours_ahead=hours_to_target,
-            cooling_strategy="ac",
-        )
-        strategies.append({
-            "method": CoolingMethod.START_AC,
-            "prediction": ac_prediction,
-            "hours_to_cool": ac_h,
-            "achieves_target": ac_within_tolerance,
-        })
+        # Evaluate AC cooling (always evaluated unless AC is not available)
+        if ac_available:
+            ac_h = self.thermal_model.find_hours_to_cool_to_target(
+                current_conditions, "ac",
+            )
+            ac_within_tolerance = (
+                ac_h is not None and ac_h <= (hours_to_target + tolerance_hours)
+            )
+            ac_prediction = self.thermal_model.predict_temperature(
+                current_conditions=current_conditions,
+                hours_ahead=hours_to_target,
+                cooling_strategy="ac",
+            )
+            strategies.append({
+                "method": CoolingMethod.START_AC,
+                "prediction": ac_prediction,
+                "hours_to_cool": ac_h,
+                "achieves_target": ac_within_tolerance,
+            })
 
         # Select best strategy (prefer energy efficiency — first that achieves within tolerance)
         best_strategy = None
@@ -217,9 +222,26 @@ class StrategyEngine:
                 best_strategy = s
                 break
 
-        # Nothing achieves target even with tolerance — fall back to AC
+        # Nothing achieves target within tolerance
         if best_strategy is None:
-            best_strategy = strategies[-1]
+            if strategies:
+                # Fall back to best available option (last evaluated = AC if available,
+                # else fan, else natural)
+                best_strategy = strategies[-1]
+            else:
+                # No strategies at all (AQI too high, nothing available) — synthesise a
+                # no-action placeholder so the rest of the code can run normally.
+                no_prediction = self.thermal_model.predict_temperature(
+                    current_conditions=current_conditions,
+                    hours_ahead=hours_to_target,
+                    cooling_strategy="natural",
+                )
+                best_strategy = {
+                    "method": CoolingMethod.NO_ACTION,
+                    "prediction": no_prediction,
+                    "hours_to_cool": None,
+                    "achieves_target": False,
+                }
 
         # Adjust method based on current device states
         method = best_strategy["method"]
@@ -246,6 +268,8 @@ class StrategyEngine:
             timing = f"by {hour_str}"
         elif best_strategy["achieves_target"]:
             timing = "NOW!"
+        elif not ac_available:
+            timing = "— target temperature may not be reachable"
         else:
             timing = "LATE — target may not be reached"
 
@@ -261,6 +285,8 @@ class StrategyEngine:
             aqi_ok=aqi_ok,
             aqi=aqi,
             hours_to_target=hours_to_target,
+            fan_available=fan_available,
+            ac_available=ac_available,
         )
 
         return CoolingStrategy(
@@ -370,6 +396,8 @@ class StrategyEngine:
         aqi_ok: bool,
         aqi: float,
         hours_to_target: float,
+        fan_available: bool = True,
+        ac_available: bool = True,
     ) -> str:
         """Generate detailed, contextual reasoning using forecast trajectory."""
         indoor_temp = conditions.get("indoor_temp", 72.0)
@@ -540,6 +568,8 @@ class StrategyEngine:
             # Explain why lower-energy options were rejected
             if not aqi_ok:
                 parts.append("Air quality prevents opening windows or using fan")
+            elif not fan_available:
+                parts.append("No fan available in this room — AC required for active cooling")
             else:
                 if fan_strategy:
                     fan_h = fan_strategy.get("hours_to_cool")
@@ -574,20 +604,42 @@ class StrategyEngine:
                         f"({indoor_temp - target_temp:.0f}°F) within the available time"
                     )
 
-        # --- Late warning ---
+        # --- Late warning / heat warning ---
         if not achieves:
-            # When outdoor is much colder than indoor and AQI is OK, opening windows
-            # alongside AC gives free supplemental cooling
-            outdoor_advantage = indoor_temp - outdoor_temp
-            if aqi_ok and outdoor_advantage >= 8 and not window_open:
+            if not ac_available:
+                # AC is not available — warn about predicted temperature instead
+                predicted_temp = strategy["prediction"].predicted_bedtime_temp
+                overshoot = predicted_temp - target_temp
+                h = int(hours_to_target)
+                m = int((hours_to_target - h) * 60)
+                time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
                 parts.append(
-                    f"Opening windows (outside is {outdoor_advantage:.0f}°F cooler) "
-                    f"alongside AC will significantly speed up cooling"
+                    f"Without AC, the room is predicted to reach "
+                    f"{predicted_temp:.0f}°F by target time "
+                    f"({overshoot:.0f}°F above the {target_temp:.0f}°F target)"
                 )
-            parts.append(
-                "Target may not be reached by the deadline — "
-                "start AC earlier next time or lower the target temperature"
-            )
+                if predicted_temp >= 85:
+                    parts.append(
+                        "This may be unsafe — consider moving to a cooler area of the home "
+                        "or taking other measures to manage the heat"
+                    )
+                elif predicted_temp >= 78:
+                    parts.append(
+                        "Consider moving to a cooler part of the home if available"
+                    )
+            else:
+                # When outdoor is much colder than indoor and AQI is OK, opening windows
+                # alongside AC gives free supplemental cooling
+                outdoor_advantage = indoor_temp - outdoor_temp
+                if aqi_ok and outdoor_advantage >= 8 and not window_open:
+                    parts.append(
+                        f"Opening windows (outside is {outdoor_advantage:.0f}°F cooler) "
+                        f"alongside AC will significantly speed up cooling"
+                    )
+                parts.append(
+                    "Target may not be reached by the deadline — "
+                    "start AC earlier next time or lower the target temperature"
+                )
 
         return ". ".join(parts) + "."
 

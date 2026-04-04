@@ -58,12 +58,14 @@ Setup is a 4-step wizard. The global settings (Step 1) only appear once for your
 
 These tell the integration what is currently running so recommendations say "keep open" instead of "open":
 
-| Field | Description |
-|---|---|
-| Window sensor | Binary sensor — is the window open? |
-| Fan sensor | Binary sensor — is the fan running? |
-| AC sensor | Binary sensor — is the AC running? |
-| Window facing directions | Multi-select — compass directions your windows face (N, NE, E, SE, S, SW, W, NW). When set, the effective wind contribution to fan and natural ventilation is scaled by how directly the wind blows through those windows. Leave empty to use full wind speed regardless of direction. |
+| Field | Default | Description |
+|---|---|---|
+| Window sensor | — | Binary sensor — is the window open? |
+| Fan sensor | — | Binary sensor — is the fan running? |
+| AC sensor | — | Binary sensor — is the AC running? |
+| Window facing directions | — | Multi-select — compass directions your windows face (N, NE, E, SE, S, SW, W, NW). When set, the effective wind contribution to fan and natural ventilation is scaled by how directly the wind blows through those windows. Leave empty to use full wind speed regardless of direction. |
+| Fan available | On | Whether this room has a fan at all. When **off**, fan recommendations are skipped and the strategy escalates directly from window → AC. |
+| AC available | On | Whether this room has air conditioning. When **off**, AC is never recommended; if cooling cannot be achieved by window alone, the integration instead warns about the predicted temperature at the target time (e.g., *“Room predicted to reach 81°F — consider moving to a cooler area”*). |
 
 ### Step 4 — Targets & Behavior
 
@@ -189,10 +191,12 @@ The simulation produces a predicted indoor temperature at the target time and an
 The engine evaluates three methods in energy-efficiency order and picks the first one that can reach the target within `target_time + tolerance`:
 
 1. **Natural ventilation** (open window) — evaluated if AQI ≤ 150
-2. **Fan** — evaluated if AQI ≤ 150
-3. **AC** — always evaluated as fallback
+2. **Fan** — evaluated if AQI ≤ 150 **and** *Fan available* is enabled for this room
+3. **AC** — evaluated if *AC available* is enabled for this room; used as fallback otherwise
 
-If no method can reach the target, AC is selected but the recommendation is labeled *"LATE — target may not be reached"*.
+If no method can reach the target and AC is not available, the recommendation warns about the predicted temperature at the deadline rather than suggesting AC.
+
+If no method can reach the target and AC is available, it is selected but the recommendation is labeled *"LATE — target may not be reached"*.
 
 The recommendation text reflects what is already running and how much time remains:
 
