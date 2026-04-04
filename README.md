@@ -42,7 +42,7 @@ Setup is a 4-step wizard. The global settings (Step 1) only appear once for your
 
 | Field | Required | Description |
 |---|---|---|
-| Weather entity | ✓ | Hourly forecast source. Must support `weather.get_forecasts` with `type: hourly`. Provides temperature, wind speed, humidity, and condition per hour. |
+| Weather entity | ✓ | Hourly forecast source. Must support `weather.get_forecasts` with `type: hourly`. Provides temperature, wind speed, wind bearing, humidity, and condition per hour. See [Forecast attributes](#forecast-attributes). |
 | Outdoor temperature sensor | ✓ | Current outdoor temperature sensor |
 | AQI sensor | — | Air Quality Index sensor. When AQI > 150, window/fan options are suppressed. |
 
@@ -63,6 +63,7 @@ These tell the integration what is currently running so recommendations say "kee
 | Window sensor | Binary sensor — is the window open? |
 | Fan sensor | Binary sensor — is the fan running? |
 | AC sensor | Binary sensor — is the AC running? |
+| Window facing directions | Multi-select — compass directions your windows face (N, NE, E, SE, S, SW, W, NW). When set, the effective wind contribution to fan and natural ventilation is scaled by how directly the wind blows through those windows. Leave empty to use full wind speed regardless of direction. |
 
 ### Step 4 — Targets & Behavior
 
@@ -118,13 +119,48 @@ physics_params:              # current model parameters for this room
 
 ---
 
+## Forecast Attributes
+
+The integration reads the following attributes from each hourly forecast entry. All are provided by Met.no, Open-Meteo, and most other HA weather integrations:
+
+| Attribute | Used for |
+|---|---|
+| `datetime` | Matching the forecast entry to the simulated hour |
+| `temperature` | Outdoor temperature in the thermal simulation |
+| `wind_speed` | Fan and natural ventilation wind factor |
+| `wind_bearing` | Wind alignment factor (degrees, 0 = N, 90 = E, 180 = S, 270 = W) |
+| `humidity` | Humidity penalty for fan/window effectiveness |
+
+Example entry (from the weather entity's hourly forecast):
+
+```yaml
+- datetime: '2026-04-04T00:00:00+00:00'
+  condition: sunny
+  wind_bearing: 220
+  wind_speed: 2.68
+  wind_gust_speed: 5.36
+  temperature: 58
+  apparent_temperature: 58
+  dew_point: 42
+  humidity: 55
+  precipitation: 0
+  precipitation_probability: 0
+  cloud_coverage: 30
+  uv_index: 2.83
+  pressure: 30.36
+```
+
+Only `datetime`, `temperature`, `wind_speed`, `wind_bearing`, and `humidity` are consumed. All other fields are ignored.
+
+---
+
 ## How It Works
 
 ### Thermal Model
 
 Every update cycle, the model simulates the room temperature hour-by-hour from now until the target time. For each hour it:
 
-1. Looks up the outdoor temperature, wind speed, and humidity from the **hourly weather forecast** (matched within 90 minutes)
+1. Looks up the outdoor temperature, wind speed, wind bearing, and humidity from the **hourly weather forecast** (matched within 90 minutes)
 2. Computes heat exchange through walls: `thermal_transfer_coefficient × (outdoor − indoor)`
 3. Adds `base_heat_gain_rate` for internal heat sources
 4. Adds solar gain if it is peak hours (noon–6 PM)
@@ -134,6 +170,17 @@ Every update cycle, the model simulates the room temperature hour-by-hour from n
    - **Natural ventilation**: scales with temp differential and wind; same humidity reduction as fan
 
 The humidity penalty for fan/window: $\text{factor} = \max(0.5,\ 1 - (RH - 40) \times 0.005)$, so 60% RH → 10% reduction, 90% RH → 25% reduction.
+
+**Wind alignment factor** (fan and natural ventilation only): when *Window facing directions* are configured, the effective wind speed is multiplied by $\max(0,\ \cos(\theta))$, where $\theta$ is the smallest angular difference between the hourly forecast's `wind_bearing` and any configured window direction. The largest alignment across all configured windows is used:
+
+| Wind vs. window | $\theta$ | Factor |
+|---|---|---|
+| Head-on | 0° | 1.00 |
+| 45° off | 45° | 0.71 |
+| Perpendicular | 90° | 0.00 |
+| Tailwind | 180° | 0.00 |
+
+With no window facing configured (or when `wind_bearing` is absent from the forecast), the factor defaults to **1.0** — no adjustment.
 
 The simulation produces a predicted indoor temperature at the target time and an `hours_to_cool` estimate for each strategy evaluated.
 
@@ -318,6 +365,9 @@ Raise `natural_cooling_effectiveness` (try 0.3–0.5). The default is conservati
 ### Fan/window cooling weaker on humid nights
 This is expected and automatic — the model reduces fan and natural ventilation effectiveness when outdoor humidity is high (see humidity penalty formula in the Thermal Model section). Your weather entity must provide `humidity` in its hourly forecast for this to work; otherwise it defaults to 50% RH.
 
+### Fan/window cooling lower than expected when wind is high
+If the forecast shows good wind speed but cooling is weaker than expected, check whether *Window facing directions* are configured. When set, the wind contribution is scaled by how well each forecast hour's `wind_bearing` aligns with the selected directions (see alignment factor table in the Thermal Model section). A southerly wind against an east-facing window gets close to zero credit. Either add or remove window directions in the room's options, or leave the field empty to disable the alignment penalty entirely.
+
 ### Learning adjustments seem too slow
 The continuous learning makes small conservative adjustments (learning rate 0.1) once a segment has ≥ 3–5 validated outcomes with mean error > 0.5°F. For faster initial tuning, run `smart_cooling.calibrate` — it processes weeks of recorder history in one pass.
 
@@ -333,6 +383,9 @@ The weather entity is not returning hourly forecast data. Verify it supports `we
 
 ### All hourly predictions show the same `outdoor_temp`
 The forecast lookup is failing. Check that your weather entity's forecast datetimes are in UTC (ISO 8601 with `+00:00`).
+
+### Wind bearing not influencing fan/window cooling
+`wind_bearing` must be present in your weather entity's hourly forecast items (most Met.no, Open-Meteo, and Yr-based integrations include it — confirm by checking the `forecast_sample` attribute on `predicted_target_temp`). If the attribute is missing the alignment factor defaults to 1.0 and wind direction has no effect. Also confirm *Window facing directions* are configured in the room's options — the bearing is only applied when at least one direction is selected.
 
 ### `action_needed_by` shows a time when no action is needed
 Update to the latest version — fixed so `action_needed_by` returns `Unknown` when strategy is `no_action`.
