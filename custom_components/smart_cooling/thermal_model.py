@@ -2,11 +2,44 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from .const import DEFAULT_PHYSICS_PARAMS
+from .const import DEFAULT_PHYSICS_PARAMS, WINDOW_DIRECTION_DEGREES
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def wind_alignment_factor(
+    wind_bearing: float | None,
+    window_facing: list[str],
+) -> float:
+    """Return how well the wind aligns with the best-facing window.
+
+    Uses cos(angle_diff) so head-on wind → 1.0, parallel → 0.0, tail → 0.0.
+    Takes the max across all configured window directions so a room with windows
+    on two walls benefits from whichever one the wind favours most.
+
+    Returns 1.0 (no penalty) when wind_bearing is None or no window_facing set.
+    """
+    if wind_bearing is None or not window_facing:
+        return 1.0
+
+    best = 0.0
+    for direction in window_facing:
+        facing_deg = WINDOW_DIRECTION_DEGREES.get(direction)
+        if facing_deg is None:
+            continue
+        # Smallest angle between wind bearing and window facing (0–180)
+        diff = abs(wind_bearing - facing_deg) % 360
+        if diff > 180:
+            diff = 360 - diff
+        alignment = max(0.0, math.cos(math.radians(diff)))
+        if alignment > best:
+            best = alignment
+    return best if best > 0.0 else 0.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -198,9 +231,12 @@ class ThermalModel:
             hour_humidity = forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0))
             if cooling_strategy == "fan":
                 hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 0.0))
+                hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
+                window_facing = current_conditions.get("window_facing", [])
+                alignment = wind_alignment_factor(hour_bearing, window_facing)
                 cooling = self.calculate_fan_cooling_rate(
                     hour_outdoor_temp, simulated_temp,
-                    wind_speed=float(hour_wind),
+                    wind_speed=float(hour_wind) * alignment,
                     outdoor_humidity=float(hour_humidity),
                 )
             elif cooling_strategy == "ac":
@@ -211,7 +247,10 @@ class ThermalModel:
                 temp_diff = simulated_temp - hour_outdoor_temp
                 if temp_diff > 0:
                     hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
-                    wind_factor = max(float(hour_wind), 1.0) / 10.0
+                    hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
+                    window_facing = current_conditions.get("window_facing", [])
+                    alignment = wind_alignment_factor(hour_bearing, window_facing)
+                    wind_factor = max(float(hour_wind) * alignment, 1.0) / 10.0
                     # Same humidity penalty as fan cooling
                     humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
                     cooling = (
@@ -304,9 +343,12 @@ class ThermalModel:
             hour_humidity = forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0))
             if cooling_strategy == "fan":
                 hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 0.0))
+                hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
+                window_facing = current_conditions.get("window_facing", [])
+                alignment = wind_alignment_factor(hour_bearing, window_facing)
                 cooling = self.calculate_fan_cooling_rate(
                     hour_outdoor_temp, simulated_temp,
-                    wind_speed=float(hour_wind),
+                    wind_speed=float(hour_wind) * alignment,
                     outdoor_humidity=float(hour_humidity),
                 )
             elif cooling_strategy == "ac":
@@ -315,7 +357,10 @@ class ThermalModel:
                 temp_diff = simulated_temp - hour_outdoor_temp
                 if temp_diff > 0:
                     hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
-                    wind_factor = max(float(hour_wind), 1.0) / 10.0
+                    hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
+                    window_facing = current_conditions.get("window_facing", [])
+                    alignment = wind_alignment_factor(hour_bearing, window_facing)
+                    wind_factor = max(float(hour_wind) * alignment, 1.0) / 10.0
                     humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
                     cooling = (
                         temp_diff

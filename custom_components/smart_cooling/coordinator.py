@@ -25,6 +25,7 @@ from .const import (
     CONF_WINDOW_SENSOR,
     CONF_FAN_SENSOR,
     CONF_AC_SENSOR,
+    CONF_WINDOW_FACING,
     CONF_TARGET_TEMP_ENTITY,
     CONF_TARGET_TIME_ENTITY,
     CONF_BEDTIME_ENTITY,  # Legacy support
@@ -176,6 +177,23 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (ValueError, TypeError):
             return 50.0
 
+    def _get_current_wind_bearing(self, forecast: list[dict[str, Any]]) -> float | None:
+        """Extract current wind bearing (degrees) from the first hourly forecast item.
+
+        Returns None if not available in the forecast.
+        wind_bearing is 0–360 degrees where 0/360=N, 90=E, 180=S, 270=W.
+        """
+        if not forecast:
+            return None
+        first_forecast = forecast[0] if forecast else {}
+        raw = first_forecast.get("wind_bearing")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            return None
+
     def _sensor_ready(self, entity_id: str | None) -> bool:
         """Return True if the entity exists and has a real (non-startup) value."""
         if not entity_id:
@@ -217,6 +235,10 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             forecast = await self._get_hourly_forecast()
             current_wind_speed = self._get_current_wind_speed(forecast)
             current_outdoor_humidity = self._get_current_outdoor_humidity(forecast)
+            current_wind_bearing = self._get_current_wind_bearing(forecast)
+
+            # Window facing: list of directions from config (e.g. ["N", "SW"])
+            window_facing: list[str] = self.config.get(CONF_WINDOW_FACING) or []
 
             # Gather current conditions for this room
             current_conditions = {
@@ -235,6 +257,8 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.config.get(CONF_AQI_SENSOR), 50.0
                 ),
                 "wind_speed": current_wind_speed,
+                "wind_bearing": current_wind_bearing,
+                "window_facing": window_facing,
                 "target_temp": self._get_sensor_value(
                     self.config.get(CONF_TARGET_TEMP_ENTITY), 72.0
                 ),

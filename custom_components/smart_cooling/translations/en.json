@@ -26,7 +26,8 @@
                 "data": {
                     "window_sensor": "Window open/closed sensor (optional)",
                     "fan_sensor": "Window fan on/off sensor (optional)",
-                    "ac_sensor": "AC on/off sensor (optional)"
+                    "ac_sensor": "AC on/off sensor (optional)",
+                    "window_facing": "Window facing directions (select all that apply)"
                 }
             },
             "targets": {
@@ -62,6 +63,7 @@
                     "window_sensor": "Window sensor",
                     "fan_sensor": "Fan sensor",
                     "ac_sensor": "AC sensor",
+                    "window_facing": "Window facing directions",
                     "target_temp_entity": "Target temperature helper",
                     "target_time_entity": "Target time helper",
                     "tolerance_minutes": "Tolerance past target time (minutes)",

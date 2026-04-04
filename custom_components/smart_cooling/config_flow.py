@@ -25,6 +25,8 @@ from .const import (
     CONF_WINDOW_SENSOR,
     CONF_FAN_SENSOR,
     CONF_AC_SENSOR,
+    CONF_WINDOW_FACING,
+    WINDOW_DIRECTION_OPTIONS,
     CONF_TARGET_TEMP_ENTITY,
     CONF_TARGET_TIME_ENTITY,
     CONF_LEARNING_ENABLED,
@@ -82,6 +84,13 @@ STEP_ROOM_DEVICES_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_AC_SENSOR): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="binary_sensor"),
+        ),
+        vol.Optional(CONF_WINDOW_FACING, default=[]): selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=WINDOW_DIRECTION_OPTIONS,
+                multiple=True,
+                mode=selector.SelectSelectorMode.LIST,
+            ),
         ),
     }
 )
@@ -318,6 +327,17 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
             description={"suggested_value": current.get(CONF_AC_SENSOR)},
         )] = selector.EntitySelector(
             selector.EntitySelectorConfig(domain="binary_sensor"),
+        )
+        # Window facing — multi-select checkboxes for compass directions
+        schema_dict[vol.Optional(
+            CONF_WINDOW_FACING,
+            default=current.get(CONF_WINDOW_FACING, []),
+        )] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=WINDOW_DIRECTION_OPTIONS,
+                multiple=True,
+                mode=selector.SelectSelectorMode.LIST,
+            ),
         )
         schema_dict[vol.Optional(
             CONF_TARGET_TEMP_ENTITY,

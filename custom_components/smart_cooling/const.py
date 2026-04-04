@@ -41,6 +41,18 @@ CONF_WINDOW_SENSOR: Final = "window_sensor"
 CONF_FAN_SENSOR: Final = "fan_sensor"
 CONF_AC_SENSOR: Final = "ac_sensor"
 
+# Window facing directions — comma-separated compass points (e.g. "N,SW")
+# Used with per-hour forecast wind_bearing to compute cross-ventilation alignment.
+# If not set (empty), wind direction is ignored and full wind speed is used.
+CONF_WINDOW_FACING: Final = "window_facing"
+
+# Compass directions offered in the config UI (label → degrees)
+WINDOW_DIRECTION_OPTIONS: Final = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+WINDOW_DIRECTION_DEGREES: Final = {
+    "N": 0, "NE": 45, "E": 90, "SE": 135,
+    "S": 180, "SW": 225, "W": 270, "NW": 315,
+}
+
 # Target helpers for this room
 # Target temperature: input_number helper (e.g., input_number.bedroom_target_temp)
 CONF_TARGET_TEMP_ENTITY: Final = "target_temp_entity"
