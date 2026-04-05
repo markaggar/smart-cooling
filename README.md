@@ -211,6 +211,9 @@ The recommendation text reflects what is already running and how much time remai
 | AC recommended, AC off, time to spare | *Start AC by 10:10 PM* |
 | AC recommended, AC running | *Continue AC* |
 | Cannot reach target in time | *Start AC LATE — target may not be reached* |
+| Window only, target not reachable | *Open window — target temperature may not be reachable* |
+| Window only, hot room (78–84°F predicted) | Reasoning includes *“consider moving to a cooler part of the home”* |
+| Window only, very hot room (≥85°F predicted) | Reasoning includes *“this may be unsafe — consider moving to a cooler area”* |
 | Already at/near target | *No action needed* |
 | Window open, outside warmer than inside | *Close window* |
 | Window open, AQI too high | *Close window* |
@@ -222,7 +225,8 @@ Once a cooling method is chosen, the engine calculates the latest time you need 
 
 - **`by HH:MM AM/PM`** — you have buffer; start no later than this time
 - **`NOW!`** — ≤ 15 minutes of buffer remaining, act immediately
-- **`LATE — target may not be reached`** — even starting immediately won't hit the target
+- **`LATE — target may not be reached`** — even starting immediately won't hit the target (AC available)
+- **`— target temperature may not be reachable`** — window cooling is insufficient and no AC is configured for this room
 
 This means a fan or AC that only needs 90 minutes to cool the room won't be triggered at 4 PM for a 10:30 PM bedtime. The `action_needed_by` sensor always shows the computed deadline as an absolute timestamp.
 
@@ -356,6 +360,11 @@ Raise `base_heat_gain_rate` or lower `thermal_transfer_coefficient`.
 
 ### Fan/window never chosen
 Increase `tolerance_minutes` (try 60 or 90) to give lower-energy methods more time.
+
+### Room has no fan or no AC
+Turn off **Fan available** or **AC available** in the room's options (Step 3 or **Configure** in the integration UI). When *Fan available* is off, the strategy skips directly from window → AC. When *AC available* is off, the strategy can only recommend opening windows; if that won’t reach the target temperature, the reasoning warns about the predicted indoor temperature at the deadline instead of recommending AC.
+
+These flags are independent — you can have a room with windows and AC but no fan, or windows only with no fan or AC.
 
 ### AC takes too long or too short
 Adjust `ac_cooling_rate_mild` and `ac_cooling_rate_hot` to match observed performance.
