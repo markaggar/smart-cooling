@@ -19,8 +19,8 @@ A Home Assistant custom integration that predicts whether your room will reach a
 
 ## Requirements
 
-- Home Assistant 2024.1 or later
-- A weather entity that supports `weather.get_forecasts` with hourly data (e.g., `weather.home` from the Met.no or Open-Meteo integrations)
+- Developed with Home Assistant 2024.1 or later. Probably works with older versions in the last year or so.
+- A weather entity that supports `weather.get_forecasts` with hourly data (e.g., `weather.home` from the Met.no, Open-Meteo or Pirate Weather integrations)
 - An indoor temperature sensor for each room
 
 ---
