@@ -277,10 +277,11 @@ class SmartCoolingActionNeededBySensor(SmartCoolingBaseSensor):
         from homeassistant.util import dt as dt_util
         now = dt_util.now()
         overdue = action_by <= now
-        minutes_remaining = (action_by - now).total_seconds() / 60
+        # Round to nearest 5 minutes to avoid per-minute attribute churn
+        minutes_remaining = round((action_by - now).total_seconds() / 300) * 5
         return {
             "overdue": overdue,
-            "minutes_remaining": round(minutes_remaining, 0),
+            "minutes_remaining": minutes_remaining,
         }
 
 

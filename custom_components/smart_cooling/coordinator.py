@@ -320,11 +320,22 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             now = dt_util.now()
 
+            def _round_to_5min(dt: datetime) -> datetime:
+                """Round a datetime to the nearest 5-minute mark to reduce sensor churn."""
+                total_seconds = (dt.hour * 3600 + dt.minute * 60 + dt.second)
+                rounded_seconds = round(total_seconds / 300) * 300
+                return dt.replace(
+                    hour=rounded_seconds // 3600 % 24,
+                    minute=(rounded_seconds % 3600) // 60,
+                    second=0,
+                    microsecond=0,
+                )
+
             # Datetime when room will reach target.
             # hours_until_cool == 0.0 means already at/below target — treat as None
             # so the sensor stays stable instead of ticking to "now" every minute.
             if hours_until_cool is not None and hours_until_cool > 0.0:
-                will_reach_target_at = now + timedelta(hours=hours_until_cool)
+                will_reach_target_at = _round_to_5min(now + timedelta(hours=hours_until_cool))
             else:
                 will_reach_target_at = None
 
@@ -339,10 +350,10 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elif hours_until_cool is not None:
                 # You can delay starting by (budget - time_it_takes)
                 delay_budget = hours_to_target + tolerance_hours - hours_until_cool
-                action_needed_by = now + timedelta(hours=max(0.0, delay_budget))
+                action_needed_by = _round_to_5min(now + timedelta(hours=max(0.0, delay_budget)))
             else:
                 # Can't reach target — action needed immediately
-                action_needed_by = now
+                action_needed_by = _round_to_5min(now)
             
             # Check if any earlier predictions' target time has now passed and
             # record the actual indoor temp so the learning module can score them.
