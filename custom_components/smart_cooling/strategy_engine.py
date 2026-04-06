@@ -141,6 +141,7 @@ class StrategyEngine:
                 reasoning=self._no_action_reasoning(
                     indoor_temp, target_temp, outdoor_temp, ac_running, fan_running,
                     prediction.predicted_bedtime_temp, hours_to_target,
+                    current_conditions,
                 ),
                 confidence=0.9,
             )
@@ -339,6 +340,23 @@ class StrategyEngine:
             )
         return None
 
+    def _format_target_time(self, conditions: dict[str, Any]) -> str:
+        """Return a stable 'H:MM AM/PM' label for the target time (no per-minute churn)."""
+        target_time_str = conditions.get("target_time", conditions.get("bedtime", ""))
+        current_time: datetime = conditions.get("current_time", datetime.now())
+        try:
+            target_time = datetime.strptime(target_time_str, "%H:%M:%S").time()
+            target_dt = current_time.replace(
+                hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0
+            )
+            if target_dt < current_time:
+                target_dt += timedelta(days=1)
+            hour12 = target_dt.hour % 12 or 12
+            ampm = "AM" if target_dt.hour < 12 else "PM"
+            return f"{hour12}:{target_dt.minute:02d} {ampm}"
+        except (ValueError, AttributeError):
+            return "target time"
+
     def _no_action_reasoning(
         self,
         indoor_temp: float,
@@ -348,6 +366,7 @@ class StrategyEngine:
         fan_running: bool,
         predicted_bedtime_temp: float | None = None,
         hours_to_target: float = 0.0,
+        conditions: dict[str, Any] | None = None,
     ) -> str:
         """Explain why no action is needed."""
         parts = []
@@ -374,12 +393,10 @@ class StrategyEngine:
             and hours_to_target > 0
             and predicted_bedtime_temp < cold_threshold
         ):
-            h = int(hours_to_target)
-            m = int((hours_to_target - h) * 60)
-            time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
+            target_label = self._format_target_time(conditions) if conditions else "target time"
             parts.append(
                 f"Room is predicted to drop to ~{predicted_bedtime_temp:.0f}°F "
-                f"in {time_str} — consider adding heat if that's too cold"
+                f"by {target_label} — consider adding heat if that's too cold"
             )
 
         return ". ".join(parts) + "."
@@ -410,9 +427,7 @@ class StrategyEngine:
         hours_to_cool = strategy.get("hours_to_cool")
         achieves = strategy.get("achieves_target", False)
         deficit = indoor_temp - target_temp
-        h = int(hours_to_target)
-        m = int((hours_to_target - h) * 60)
-        time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
+        target_time_label = self._format_target_time(conditions)
 
         parts: list[str] = []
 
@@ -420,12 +435,12 @@ class StrategyEngine:
         if deficit > 15:
             parts.append(
                 f"Room is very hot ({indoor_temp:.0f}°F) — "
-                f"cooling {deficit:.0f}°F in {time_str} is a large task"
+                f"cooling {deficit:.0f}°F by {target_time_label} is a large task"
             )
         else:
             parts.append(
                 f"Room is {indoor_temp:.1f}°F, needs to reach {target_temp:.1f}°F "
-                f"({deficit:.1f}°F drop) in {time_str}"
+                f"({deficit:.1f}°F drop) by {target_time_label}"
             )
 
         # --- Forecast trajectory ---
@@ -531,8 +546,13 @@ class StrategyEngine:
         ac_strategy = next((s for s in strategies if s["method"] == CoolingMethod.START_AC), None)
 
         def _cool_time_str(hrs: float) -> str:
-            ch = int(hrs)
-            cm = int((hrs - ch) * 60)
+            # Round to nearest 15 minutes to reduce sensor update churn
+            rounded = round(hrs / 0.25) * 0.25
+            ch = int(rounded)
+            cm = round((rounded - ch) * 60)
+            if cm == 60:
+                ch += 1
+                cm = 0
             return f"{ch}h {cm}m" if ch > 0 else f"{cm} min"
 
         if method in (CoolingMethod.OPEN_WINDOW, CoolingMethod.KEEP_WINDOW_OPEN):
@@ -611,9 +631,6 @@ class StrategyEngine:
                 # AC is not available — warn about predicted temperature instead
                 predicted_temp = strategy["prediction"].predicted_bedtime_temp
                 overshoot = predicted_temp - target_temp
-                h = int(hours_to_target)
-                m = int((hours_to_target - h) * 60)
-                time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
                 parts.append(
                     f"Without AC, the room is predicted to reach "
                     f"{predicted_temp:.0f}°F by target time "
