@@ -367,18 +367,19 @@ class StrategyEngine:
         elif outdoor_temp < indoor_temp:
             parts.append(f"Outside air ({outdoor_temp:.1f}°F) is cooler and providing passive cooling")
 
-        # Warn if the room will continue drifting well below target
+        # Warn only if the room is predicted to drop into genuinely cold territory
+        cold_threshold = 64.0
         if (
             predicted_bedtime_temp is not None
             and hours_to_target > 0
-            and predicted_bedtime_temp < target_temp - 1.5
+            and predicted_bedtime_temp < cold_threshold
         ):
             h = int(hours_to_target)
             m = int((hours_to_target - h) * 60)
             time_str = f"{h}h {m}m" if h > 0 else f"{m} min"
             parts.append(
-                f"Without heating, the room will drift to ~{predicted_bedtime_temp:.0f}°F "
-                f"in {time_str} — consider adding heat to avoid over-cooling"
+                f"Room is predicted to drop to ~{predicted_bedtime_temp:.0f}°F "
+                f"in {time_str} — consider adding heat if that's too cold"
             )
 
         return ". ".join(parts) + "."
