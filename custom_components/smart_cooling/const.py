@@ -100,7 +100,7 @@ DEFAULT_PHYSICS_PARAMS: Final = {
     "solar_gain_factor": 0.6,  # multiplier for solar heat
     "ac_cooling_rate_mild": 4.5,  # °F/hr when outdoor < 82°F
     "ac_cooling_rate_hot": 2.5,  # °F/hr when outdoor >= 82°F
-    "natural_cooling_effectiveness": 0.05,  # natural ventilation coefficient
+    "natural_cooling_effectiveness": 0.15,  # natural ventilation coefficient
     "fan_cooling_effectiveness": 0.15,  # fan ventilation coefficient
     "fan_equivalent_wind_speed": 8.0,  # mph equivalent wind from fan
     "fan_boost_factor": 1.4,  # multiplier when fan + wind

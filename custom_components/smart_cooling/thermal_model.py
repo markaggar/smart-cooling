@@ -250,7 +250,10 @@ class ThermalModel:
                     hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
                     window_facing = current_conditions.get("window_facing", [])
                     alignment = wind_alignment_factor(hour_bearing, window_facing)
-                    wind_factor = max(float(hour_wind) * alignment, 1.0) / 10.0
+                    # Floor of 0.3 (not 1.0) so truly still air gives near-zero
+                    # ventilation — aligns with real experience that open windows
+                    # don't cool much without wind.
+                    wind_factor = max(float(hour_wind) * alignment, 0.3) / 10.0
                     # Same humidity penalty as fan cooling
                     humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
                     cooling = (
@@ -366,7 +369,7 @@ class ThermalModel:
                     hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
                     window_facing = current_conditions.get("window_facing", [])
                     alignment = wind_alignment_factor(hour_bearing, window_facing)
-                    wind_factor = max(float(hour_wind) * alignment, 1.0) / 10.0
+                    wind_factor = max(float(hour_wind) * alignment, 0.3) / 10.0
                     humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
                     cooling = (
                         temp_diff

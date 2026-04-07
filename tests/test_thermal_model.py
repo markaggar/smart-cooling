@@ -25,7 +25,7 @@ class TestThermalModel:
     def test_initialization(self, model: ThermalModel):
         """Test model initializes with default parameters."""
         assert model.params == DEFAULT_PHYSICS_PARAMS
-        assert model.params["base_heat_gain_rate"] == 2.2
+        assert model.params["base_heat_gain_rate"] == DEFAULT_PHYSICS_PARAMS["base_heat_gain_rate"]
 
     def test_update_params(self, model: ThermalModel):
         """Test updating physics parameters."""

@@ -119,7 +119,9 @@ class StrategyEngine:
         # before evaluating cooling strategies.
         if window_open:
             close_reason = self._close_window_reason(
-                indoor_temp, outdoor_temp, target_temp, aqi, cooling_deficit
+                indoor_temp, outdoor_temp, target_temp, aqi, cooling_deficit,
+                wind_speed=wind_speed,
+                predicted_open_temp=prediction.predicted_bedtime_temp,
             )
             if close_reason:
                 return CoolingStrategy(
@@ -327,6 +329,8 @@ class StrategyEngine:
         target_temp: float,
         aqi: float,
         cooling_deficit: float,
+        wind_speed: float = 0.0,
+        predicted_open_temp: float | None = None,
     ) -> str | None:
         """Return a reason string if the open window should be closed, else None."""
         # Bad air quality — always close
@@ -344,10 +348,30 @@ class StrategyEngine:
         # Room is already at or well below target and outside is much colder — over-cooling risk
         if cooling_deficit <= self.comfort_tolerance and outdoor_temp < target_temp - 5.0:
             excess = indoor_temp - outdoor_temp
+            # Explain what is driving the predicted cool-down: wind or walls
+            if wind_speed < 2.0:
+                wind_note = (
+                    f" Wind is calm ({wind_speed:.1f} mph) — cool-down is mainly through "
+                    f"wall conduction, not the window itself."
+                )
+            elif wind_speed < 5.0:
+                wind_note = (
+                    f" Light wind ({wind_speed:.1f} mph) is contributing some air exchange "
+                    f"through the window."
+                )
+            else:
+                wind_note = (
+                    f" Wind at {wind_speed:.1f} mph is actively pushing cold outside air "
+                    f"through the window."
+                )
+            temp_note = (
+                f" Room is predicted to reach {predicted_open_temp:.0f}°F with window open."
+                if predicted_open_temp is not None else ""
+            )
             return (
                 f"Close window: room is already at target ({indoor_temp:.1f}°F) and outside "
-                f"is {outdoor_temp:.1f}°F — {excess:.1f}°F colder than inside. "
-                f"The room will over-cool without intervention."
+                f"is {outdoor_temp:.1f}°F — {excess:.1f}°F colder than inside."
+                f"{temp_note}{wind_note}"
             )
         return None
 

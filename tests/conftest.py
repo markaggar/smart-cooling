@@ -19,6 +19,8 @@ _ha_modules = {
     "homeassistant.const": MagicMock(),
     "homeassistant.data_entry_flow": MagicMock(),
     "homeassistant.helpers.selector": MagicMock(),
+    "homeassistant.util": MagicMock(),
+    "homeassistant.util.dt": MagicMock(),
 }
 
 # Add ConfigEntry mock
