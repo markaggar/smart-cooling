@@ -33,6 +33,7 @@ from .const import (
     CONF_BEDTIME_ENTITY,  # Legacy support
     CONF_TOLERANCE_MINUTES,
     DEFAULT_TOLERANCE_MINUTES,
+    CONF_AC_SETPOINT_ENTITY,
 )
 from .thermal_model import ThermalModel
 from .strategy_engine import StrategyEngine
@@ -108,6 +109,28 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if state is None or state.state in ("unknown", "unavailable"):
             return None
         return state.state == "on"
+
+    def _get_ac_setpoint(self) -> float | None:
+        """Read AC setpoint from configured entity.
+
+        Supports climate entities (reads target temperature from attributes)
+        and input_number entities (reads state directly).
+        Returns None if no entity configured or value is unavailable.
+        """
+        entity_id = self.config.get(CONF_AC_SETPOINT_ENTITY)
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable"):
+            return None
+        domain = entity_id.split(".")[0]
+        try:
+            if domain == "climate":
+                val = state.attributes.get("temperature")
+                return float(val) if val is not None else None
+            return float(state.state)
+        except (ValueError, TypeError):
+            return None
 
     def _get_time_value(self, entity_id: str | None, default: str = "22:30:00") -> str:
         """Get time value from an entity."""
@@ -281,6 +304,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ),
                 "fan_available": bool(self.config.get(CONF_FAN_AVAILABLE, True)),
                 "ac_available": bool(self.config.get(CONF_AC_AVAILABLE, True)),
+                "ac_setpoint": self._get_ac_setpoint(),
                 "current_time": dt_util.now(),
                 "forecast": forecast,
             }
@@ -288,10 +312,21 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Calculate hours until target time
             hours_to_target = self._hours_to_target_time(current_conditions["target_time"])
             
-            # Run thermal model prediction
+            # No-action prediction: model current device state continuing as-is,
+            # not a cold-walls-only world where everything is suddenly turned off.
+            if current_conditions.get("ac_running"):
+                existing_strategy: str | None = "ac"
+            elif current_conditions.get("fan_running"):
+                existing_strategy = "fan"
+            elif current_conditions.get("window_open"):
+                existing_strategy = "natural"
+            else:
+                existing_strategy = None
+
             prediction = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
                 hours_ahead=hours_to_target,
+                cooling_strategy=existing_strategy,
             )
             
             # Get strategy recommendation (tolerance-aware)

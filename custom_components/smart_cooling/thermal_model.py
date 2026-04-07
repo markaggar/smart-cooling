@@ -263,6 +263,12 @@ class ThermalModel:
             # Net temperature change
             net_change = heat_gain - cooling
             simulated_temp += net_change
+
+            # AC setpoint clamp: the AC cycles off when it reaches its own setpoint,
+            # so the simulation should not let the room cool past it.
+            ac_setpoint = current_conditions.get("ac_setpoint")
+            if cooling_strategy == "ac" and ac_setpoint is not None:
+                simulated_temp = max(simulated_temp, float(ac_setpoint))
             
             hourly_predictions.append({
                 "hour": hour,
@@ -372,6 +378,11 @@ class ThermalModel:
             # Apply fractional step (rates are per-hour; step is 0.25h)
             net_change = heat_gain - cooling
             simulated_temp += net_change * step_hours
+
+            # AC setpoint clamp: AC won't cool below its own setpoint.
+            ac_setpoint = current_conditions.get("ac_setpoint")
+            if cooling_strategy == "ac" and ac_setpoint is not None:
+                simulated_temp = max(simulated_temp, float(ac_setpoint))
 
             if simulated_temp <= target_temp:
                 return round(elapsed_hours + step_hours, 2)

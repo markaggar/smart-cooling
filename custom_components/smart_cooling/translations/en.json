@@ -29,7 +29,8 @@
                     "ac_sensor": "AC on/off sensor (optional)",
                     "window_facing": "Window facing directions (select all that apply)",
                     "fan_available": "Fan available in this room",
-                    "ac_available": "AC available in this room"
+                    "ac_available": "AC available in this room",
+                    "ac_setpoint_entity": "AC thermostat setpoint entity (climate or input_number, optional) — prevents over-predicting AC cooling past its own setpoint"
                 }
             },
             "targets": {
@@ -68,6 +69,7 @@
                     "window_facing": "Window facing directions",
                     "fan_available": "Fan available",
                     "ac_available": "AC available",
+                    "ac_setpoint_entity": "AC thermostat setpoint entity (optional)",
                     "target_temp_entity": "Target temperature helper",
                     "target_time_entity": "Target time helper",
                     "tolerance_minutes": "Tolerance past target time (minutes)",

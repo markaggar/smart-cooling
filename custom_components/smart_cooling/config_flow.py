@@ -29,6 +29,7 @@ from .const import (
     WINDOW_DIRECTION_OPTIONS,
     CONF_FAN_AVAILABLE,
     CONF_AC_AVAILABLE,
+    CONF_AC_SETPOINT_ENTITY,
     CONF_TARGET_TEMP_ENTITY,
     CONF_TARGET_TIME_ENTITY,
     CONF_LEARNING_ENABLED,
@@ -96,6 +97,9 @@ STEP_ROOM_DEVICES_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_FAN_AVAILABLE, default=True): selector.BooleanSelector(),
         vol.Optional(CONF_AC_AVAILABLE, default=True): selector.BooleanSelector(),
+        vol.Optional(CONF_AC_SETPOINT_ENTITY): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain=["climate", "input_number"]),
+        ),
     }
 )
 
@@ -351,6 +355,12 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
             CONF_AC_AVAILABLE,
             default=current.get(CONF_AC_AVAILABLE, True),
         )] = selector.BooleanSelector()
+        schema_dict[vol.Optional(
+            CONF_AC_SETPOINT_ENTITY,
+            description={"suggested_value": current.get(CONF_AC_SETPOINT_ENTITY)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain=["climate", "input_number"]),
+        )
         schema_dict[vol.Optional(
             CONF_TARGET_TEMP_ENTITY,
             description={"suggested_value": current.get(CONF_TARGET_TEMP_ENTITY)},
