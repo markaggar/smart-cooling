@@ -131,8 +131,19 @@ class StrategyEngine:
                     confidence=0.9,
                 )
 
-        # Check if we need cooling at all
-        if cooling_deficit <= self.comfort_tolerance:
+        # Check if we need cooling at all.
+        # Override NO_ACTION when the room is currently above target by >1°F and free
+        # window cooling is available (outdoor below target, AQI ok, window closed).
+        # Without this, "predicted to cool to 58°F in 24h through closed walls" would
+        # suppress an obvious recommendation to just open the window now.
+        _free_cooling_override = (
+            indoor_temp > target_temp + 1.0
+            and not window_open
+            and aqi <= self.aqi_threshold
+            and outdoor_temp < target_temp
+            and (indoor_temp - outdoor_temp) >= self.min_temp_advantage
+        )
+        if cooling_deficit <= self.comfort_tolerance and not _free_cooling_override:
             return CoolingStrategy(
                 method=CoolingMethod.NO_ACTION,
                 timing="",
@@ -379,12 +390,20 @@ class StrategyEngine:
         else:
             parts.append(f"Room is {indoor_temp:.1f}°F, within comfort range of {target_temp:.1f}°F target")
 
+        window_open = conditions.get("window_open", False) if conditions else False
         if ac_running:
             parts.append("AC is already running and keeping up")
         elif fan_running:
             parts.append("Fan is running effectively")
         elif outdoor_temp < indoor_temp:
-            parts.append(f"Outside air ({outdoor_temp:.1f}°F) is cooler and providing passive cooling")
+            if window_open:
+                parts.append(f"Outside air ({outdoor_temp:.1f}°F) is cooler and providing passive cooling")
+            else:
+                diff = indoor_temp - outdoor_temp
+                parts.append(
+                    f"Outside is {outdoor_temp:.1f}°F ({diff:.1f}°F cooler, "
+                    f"but window is closed — cooling slowly through walls only)"
+                )
 
         # Warn only if the room is predicted to drop into genuinely cold territory
         cold_threshold = 64.0

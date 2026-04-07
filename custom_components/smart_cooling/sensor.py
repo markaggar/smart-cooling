@@ -68,7 +68,7 @@ class SmartCoolingBaseSensor(CoordinatorEntity[SmartCoolingCoordinator], SensorE
         """Return device information."""
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.entry_id)},
-            name="Smart Cooling",
+            name=self.coordinator.room_name,
             manufacturer=MANUFACTURER,
             model="Smart Cooling Controller",
             sw_version="0.1.0",
