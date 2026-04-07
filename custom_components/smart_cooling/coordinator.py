@@ -313,6 +313,26 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 active_strategy = "natural"
 
+            # Second prediction: what is the room temperature at target time if the
+            # recommendation is followed right now?  (no-action prediction above only
+            # models passive heat transfer through closed walls.)
+            if "fan" in cooling_method:
+                action_prediction_strategy: str | None = "fan"
+            elif "ac" in cooling_method:
+                action_prediction_strategy = "ac"
+            elif "close" in cooling_method or cooling_method == "no_action":
+                # Closing window / doing nothing — no active cooling
+                action_prediction_strategy = None
+            else:
+                # open_window, keep_window_open
+                action_prediction_strategy = "natural"
+
+            with_action_prediction = self.thermal_model.predict_temperature(
+                current_conditions=current_conditions,
+                hours_ahead=hours_to_target,
+                cooling_strategy=action_prediction_strategy,
+            )
+
             hours_until_cool = self.thermal_model.find_hours_to_cool_to_target(
                 current_conditions=current_conditions,
                 cooling_strategy=active_strategy,
@@ -374,6 +394,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "room_name": self.room_name,
                 "current_conditions": current_conditions,
                 "prediction": prediction,
+                "with_action_prediction": with_action_prediction,
                 "strategy": strategy,
                 "learned_params": self.thermal_model.params,
                 "prediction_confidence": self.learning_module.get_confidence(),

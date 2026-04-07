@@ -33,6 +33,7 @@ async def async_setup_entry(
     entities = [
         SmartCoolingRecommendationSensor(coordinator, entry),
         SmartCoolingPredictedTempSensor(coordinator, entry),
+        SmartCoolingPredictedWithActionSensor(coordinator, entry),
         SmartCoolingDeficitSensor(coordinator, entry),
         SmartCoolingConfidenceSensor(coordinator, entry),
         SmartCoolingTimeToTargetSensor(coordinator, entry),
@@ -118,7 +119,7 @@ class SmartCoolingRecommendationSensor(SmartCoolingBaseSensor):
 
 
 class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
-    """Sensor showing predicted bedtime temperature."""
+    """Sensor showing predicted temperature at target time with NO action taken (baseline)."""
 
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -131,12 +132,12 @@ class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
     ) -> None:
         """Initialize the predicted temp sensor."""
         super().__init__(
-            coordinator, entry, "predicted_target_temp", "Predicted Temperature at Target Time"
+            coordinator, entry, "predicted_target_temp", "Predicted Temp (No Action)"
         )
 
     @property
     def native_value(self) -> float | None:
-        """Return the predicted temperature."""
+        """Return the predicted temperature if nothing is done."""
         if not self.coordinator.data:
             return None
         prediction = self.coordinator.data.get("prediction")
@@ -149,15 +150,55 @@ class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
         """Return prediction details including hourly breakdown and forecast diagnostics."""
         if not self.coordinator.data:
             return {}
-        
         prediction = self.coordinator.data.get("prediction")
         if not prediction:
             return {}
-        
         attrs = prediction.to_dict()
         attrs["forecast_entries"] = self.coordinator.data.get("forecast_entries", 0)
         attrs["forecast_sample"] = self.coordinator.data.get("forecast_sample", [])
         attrs["physics_params"] = self.coordinator.data.get("learned_params", {})
+        return attrs
+
+
+class SmartCoolingPredictedWithActionSensor(SmartCoolingBaseSensor):
+    """Sensor showing predicted temperature at target time if the recommendation is followed."""
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:thermometer-check"
+
+    def __init__(
+        self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
+    ) -> None:
+        """Initialize the with-action predicted temp sensor."""
+        super().__init__(
+            coordinator, entry, "predicted_temp_with_action", "Predicted Temp (With Recommendation)"
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the predicted temperature if recommendation is acted on now."""
+        if not self.coordinator.data:
+            return None
+        with_action = self.coordinator.data.get("with_action_prediction")
+        if with_action:
+            return round(with_action.predicted_bedtime_temp, 1)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return hourly breakdown for the with-action scenario."""
+        if not self.coordinator.data:
+            return {}
+        with_action = self.coordinator.data.get("with_action_prediction")
+        strategy = self.coordinator.data.get("strategy")
+        if not with_action:
+            return {}
+        attrs = with_action.to_dict()
+        if strategy:
+            attrs["recommendation"] = strategy.method.value
         return attrs
 
 
