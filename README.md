@@ -13,7 +13,9 @@ A Home Assistant custom integration that predicts whether your room will reach a
 - **Close-window detection** — if a window is open but outdoor conditions have turned counterproductive (outside warmer than inside, AQI spike, or over-cooling risk), the recommendation immediately switches to *"Close window"* with a reason
 - **Adaptive learning** — segmented by what was running (passive, window, fan, AC); each mode independently tunes its own parameters from nightly outcomes
 - **Tolerance-aware scheduling** — gives lower-energy methods extra time before escalating to AC
-- **8 sensors per room** — recommendation, predicted temp, deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning
+- **9 sensors per room** — recommendation, two predicted-temp sensors (no-action baseline and with-recommendation), deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning
+- **AC setpoint awareness** — optional thermostat setpoint entity prevents the model from predicting AC cooling past the temperature the AC will actually stop at
+- **Close-window wind context** — when recommending to close a window, the reasoning now explains whether calm walls, light breeze, or active wind is driving the predicted cool-down
 
 ---
 
@@ -82,13 +84,14 @@ All options except room name are editable after setup via **Settings → Devices
 
 ## Sensors
 
-Each room creates 8 sensors with IDs following the pattern `sensor.smart_cooling_{room_name}_{key}`:
+Each room creates 9 sensors with IDs following the pattern `sensor.smart_cooling_{room_name}_{key}`:
 
 | Sensor | What it shows |
 |---|---|
 | `recommendation` | Human-readable action, e.g. *"Open window now"* or *"Start AC — target may not be reached"* |
-| `predicted_target_temp` | Predicted °F the room will be at the target time under the current strategy. Attributes include `hourly_predictions`, `forecast_entries`, `forecast_sample`, and `physics_params`. |
-| `cooling_deficit` | Degrees above target the room is predicted to be at the deadline. Negative = room will overshoot (good). |
+| `predicted_target_temp` | **Predicted Temp (No Action)** — predicted °F at the target time if the current device state continues unchanged (AC stays on if running, window stays open if open, etc.). Attributes include `hourly_predictions`, `forecast_entries`, `forecast_sample`, and `physics_params`. |
+| `predicted_temp_with_action` | **Predicted Temp (With Recommendation)** — predicted °F at the target time if the recommended action is followed immediately. Useful for seeing the gap between doing something and doing nothing. |
+| `cooling_deficit` | Degrees above target the room is predicted to be at the deadline. Negative = room will be below target (over-cooling). Computed from the no-action prediction. |
 | `prediction_confidence` | 0–100% accuracy confidence based on past predictions. Below 10 validated predictions, shows 50%. See [Confidence](#prediction-confidence). |
 | `time_to_target` | Hours remaining until the target time |
 | `will_reach_target_at` | Datetime when the room is predicted to reach the target temperature. `Unknown` if already there. |
@@ -238,7 +241,11 @@ If a window is open but outdoor conditions have changed to make it counterproduc
 |---|---|---|
 | Outside warmer than inside | `outdoor_temp ≥ indoor_temp` | *"Outside (74°F) is at or warmer than inside (72°F) — the window is adding heat, not removing it"* |
 | AQI too high | `AQI > 150` | *"AQI is 162 — switch to fan or AC for cooling"* |
-| Over-cooling risk | Room at target, outside ≥ 5°F below target | *"Room is already at target (68°F) and outside is 58°F — the room will over-cool without intervention"* |
+| Over-cooling risk | Room at target, outside ≥ 5°F below target | *"Room is already at target (68°F) and outside is 58°F — 6°F colder than inside. Room is predicted to reach 62°F with window open. Wind is calm (0.8 mph) — cool-down is mainly through wall conduction, not the window itself."* |
+
+When closing a window due to over-cooling, the reasoning now includes:
+- The predicted temperature at the deadline with the window left open
+- A wind context note: calm (< 2 mph), light (2–5 mph), or strong (> 5 mph) — so you can judge whether it is ongoing air exchange or just cold walls driving the prediction
 
 The close-window check runs before strategy selection, so it takes priority over any cooling recommendation.
 
@@ -306,11 +313,13 @@ These control the thermal model and are stored per-room in `.storage/smart_cooli
 | `solar_gain_factor` | 0.6 | multiplier | Raise for south/west-facing rooms with many windows |
 | `ac_cooling_rate_mild` | 4.5 | °F/hr | Adjust if AC reaches target faster/slower on mild days (outdoor < 82°F) |
 | `ac_cooling_rate_hot` | 2.5 | °F/hr | Adjust for hot days (outdoor ≥ 82°F) |
-| `natural_cooling_effectiveness` | 0.05 | coefficient | The passive airflow bonus from opening windows, on top of wall conduction. Range 0.2–0.5 for a breezy room. |
+| `natural_cooling_effectiveness` | 0.15 | coefficient | The passive airflow bonus from opening windows, on top of wall conduction. Near-zero at calm wind (< 1 mph); meaningful at 5+ mph. Tunable by the learning system from window-open nights. |
 | `fan_cooling_effectiveness` | 0.15 | coefficient | Raise if fan is more effective than predicted |
 | `fan_equivalent_wind_speed` | 8.0 | mph | Effective wind speed assumed for fan on calm nights |
 
-> **Note:** `base_heat_gain_rate` defaults only apply to new rooms. If a room was set up before this was changed, update it via `smart_cooling.set_params` or `smart_cooling.calibrate`.
+> **Note:** Default values only apply to new rooms. If a room was set up before a default was changed, update parameters via `smart_cooling.set_params` or `smart_cooling.calibrate`.
+
+> **AC setpoint clamping:** When an *AC thermostat setpoint entity* is configured, every step of the AC simulation clamps the predicted temperature at that setpoint — the AC cycles off at its own setpoint in reality, so the simulation matches. Configure this if predictions show the AC cooling the room well past where it actually stops.
 
 ---
 
@@ -372,8 +381,8 @@ Adjust `ac_cooling_rate_mild` and `ac_cooling_rate_hot` to match observed perfor
 ### Close window triggers too often or not enough
 The over-cooling close-window trigger fires when the room is at target and outside is ≥ 5°F below target. This threshold is not currently configurable; if your room cools aggressively on cold nights, ensure your `base_heat_gain_rate` and `thermal_transfer_coefficient` are tuned accurately so the model predicts this correctly.
 
-### Natural ventilation seems underrated
-Raise `natural_cooling_effectiveness` (try 0.3–0.5). The default is conservative — it represents only the passive airflow bonus on top of wall conduction, which already handles most cooling when outdoor air is much cooler than indoor.
+### Natural ventilation seems underrated or overrated
+`natural_cooling_effectiveness` (default 0.15) represents the airflow bonus from an open window on top of passive wall conduction. Its effect scales with wind speed — at calm conditions (< 2 mph) it contributes almost nothing; at 5–10 mph it adds ~4–7°F of extra overnight cooling. Raise it (try 0.3–0.4) if the window feels more effective than predicted on breezy nights; lower it if the room stays warmer than predicted. The learning system will also tune this from window-open nights automatically.
 
 ### Fan/window cooling weaker on humid nights
 This is expected and automatic — the model reduces fan and natural ventilation effectiveness when outdoor humidity is high (see humidity penalty formula in the Thermal Model section). Your weather entity must provide `humidity` in its hourly forecast for this to work; otherwise it defaults to 50% RH.
