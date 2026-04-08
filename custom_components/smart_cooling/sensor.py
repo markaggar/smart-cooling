@@ -157,6 +157,11 @@ class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
         attrs["forecast_entries"] = self.coordinator.data.get("forecast_entries", 0)
         attrs["forecast_sample"] = self.coordinator.data.get("forecast_sample", [])
         attrs["physics_params"] = self.coordinator.data.get("learned_params", {})
+        # 24-hour peak predictions (window open vs. closed)
+        attrs["peak_temp_closed"] = self.coordinator.data.get("peak_temp_closed")
+        attrs["peak_at_closed"] = self.coordinator.data.get("peak_at_closed")
+        attrs["peak_temp_open"] = self.coordinator.data.get("peak_temp_open")
+        attrs["peak_at_open"] = self.coordinator.data.get("peak_at_open")
         return attrs
 
 

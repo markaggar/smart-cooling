@@ -368,6 +368,52 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cooling_strategy=action_prediction_strategy,
             )
 
+            # 24-hour peak predictions: how hot will the room get in the next 24h
+            # with the window open (natural ventilation) vs. closed (walls only)?
+            # Always uses a fixed 24h horizon so the peak is captured regardless
+            # of how far away the target time is.
+            def _extract_peak(
+                hourly: list[dict],
+            ) -> tuple[float, str] | tuple[None, None]:
+                """Return (peak_temp, iso_time_rounded_30min) from hourly_predictions."""
+                if not hourly:
+                    return None, None
+                peak_entry = max(hourly, key=lambda h: h["predicted_temp"])
+                peak_temp = round(peak_entry["predicted_temp"], 1)
+                # Round to nearest 30 minutes to reduce churn
+                try:
+                    from datetime import datetime as _dt
+                    raw = _dt.fromisoformat(peak_entry["time"])
+                    total_minutes = raw.hour * 60 + raw.minute
+                    rounded_minutes = round(total_minutes / 30) * 30
+                    rounded = raw.replace(
+                        hour=rounded_minutes // 60 % 24,
+                        minute=rounded_minutes % 60,
+                        second=0,
+                        microsecond=0,
+                    )
+                    peak_time = rounded.isoformat()
+                except Exception:
+                    peak_time = peak_entry["time"]
+                return peak_temp, peak_time
+
+            peak_24h_closed_pred = self.thermal_model.predict_temperature(
+                current_conditions=current_conditions,
+                hours_ahead=24,
+                cooling_strategy=None,
+            )
+            peak_24h_open_pred = self.thermal_model.predict_temperature(
+                current_conditions=current_conditions,
+                hours_ahead=24,
+                cooling_strategy="natural",
+            )
+            peak_temp_closed, peak_at_closed = _extract_peak(
+                peak_24h_closed_pred.hourly_predictions
+            )
+            peak_temp_open, peak_at_open = _extract_peak(
+                peak_24h_open_pred.hourly_predictions
+            )
+
             hours_until_cool = self.thermal_model.find_hours_to_cool_to_target(
                 current_conditions=current_conditions,
                 cooling_strategy=active_strategy,
@@ -432,6 +478,10 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "with_action_prediction": with_action_prediction,
                 "strategy": strategy,
                 "learned_params": self.thermal_model.params,
+                "peak_temp_closed": peak_temp_closed,
+                "peak_at_closed": peak_at_closed,
+                "peak_temp_open": peak_temp_open,
+                "peak_at_open": peak_at_open,
                 "prediction_confidence": self.learning_module.get_confidence(),
                 "hours_to_target": hours_to_target,
                 "hours_until_cool": hours_until_cool,
