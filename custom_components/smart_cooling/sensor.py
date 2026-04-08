@@ -17,6 +17,20 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
+from .const import (
+    CONF_WEATHER_ENTITY,
+    CONF_OUTDOOR_TEMP_SENSOR,
+    CONF_AQI_SENSOR,
+    CONF_INDOOR_TEMP_SENSOR,
+    CONF_INDOOR_HUMIDITY_SENSOR,
+    CONF_WINDOW_SENSOR,
+    CONF_FAN_SENSOR,
+    CONF_AC_SENSOR,
+    CONF_TARGET_TEMP_ENTITY,
+    CONF_TARGET_TIME_ENTITY,
+    CONF_BEDTIME_ENTITY,
+    CONF_AC_SETPOINT_ENTITY,
+)
 from .coordinator import SmartCoolingCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,6 +54,7 @@ async def async_setup_entry(
         SmartCoolingWillReachTargetAtSensor(coordinator, entry),
         SmartCoolingActionNeededBySensor(coordinator, entry),
         SmartCoolingReasoningSensor(coordinator, entry),
+        SmartCoolingConfiguredSensorsSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -406,3 +421,52 @@ class SmartCoolingConfidenceSensor(SmartCoolingBaseSensor):
         return {
             "learned_params": self.coordinator.data.get("learned_params", {}),
         }
+
+
+class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
+    """Sensor reporting the count and entity IDs of all configured inputs for this room."""
+
+    _attr_icon = "mdi:format-list-checks"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
+    ) -> None:
+        """Initialize the configured sensors sensor."""
+        super().__init__(coordinator, entry, "configured_sensors", "Configured Sensors")
+
+    def _get_all_slots(self) -> dict[str, str | None]:
+        """Return a flat dict of slot_name -> entity_id for global + per-room config.
+
+        coordinator.config is already the merged view (global keys overlaid onto
+        per-room entry data), so one lookup covers everything.
+        """
+        cfg: dict = self.coordinator.config
+        return {
+            # Global sensors (shared across all rooms)
+            "weather_entity": cfg.get(CONF_WEATHER_ENTITY),
+            "outdoor_temp_sensor": cfg.get(CONF_OUTDOOR_TEMP_SENSOR),
+            "aqi_sensor": cfg.get(CONF_AQI_SENSOR),
+            # Per-room sensors
+            "indoor_temp_sensor": cfg.get(CONF_INDOOR_TEMP_SENSOR),
+            "indoor_humidity_sensor": cfg.get(CONF_INDOOR_HUMIDITY_SENSOR),
+            "window_sensor": cfg.get(CONF_WINDOW_SENSOR),
+            "fan_sensor": cfg.get(CONF_FAN_SENSOR),
+            "ac_sensor": cfg.get(CONF_AC_SENSOR),
+            "ac_setpoint_entity": cfg.get(CONF_AC_SETPOINT_ENTITY),
+            "target_temp_entity": cfg.get(CONF_TARGET_TEMP_ENTITY),
+            "target_time_entity": (
+                cfg.get(CONF_TARGET_TIME_ENTITY)
+                or cfg.get(CONF_BEDTIME_ENTITY)
+            ),
+        }
+
+    @property
+    def native_value(self) -> int:
+        """Return the count of slots that have an entity ID configured."""
+        return sum(1 for v in self._get_all_slots().values() if v)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return all slot → entity_id mappings (None when not configured)."""
+        return self._get_all_slots()

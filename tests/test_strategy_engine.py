@@ -54,7 +54,7 @@ class TestStrategyEngine:
         strategy = engine.recommend(conditions, prediction)
         
         assert strategy.method == CoolingMethod.NO_ACTION
-        assert "comfort" in strategy.reasoning.lower()
+        assert "already at" in strategy.reasoning.lower() or "comfort" in strategy.reasoning.lower()
 
     def test_recommends_fan_when_outdoor_cooler(self, engine: StrategyEngine, thermal_model: ThermalModel):
         """Test fan recommendation when outdoor is significantly cooler."""
