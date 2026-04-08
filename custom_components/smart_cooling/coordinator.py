@@ -302,6 +302,9 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ac_running": self._get_binary_state(
                     self.config.get(CONF_AC_SENSOR)
                 ),
+                "window_sensor_configured": bool(self.config.get(CONF_WINDOW_SENSOR)),
+                "fan_sensor_configured": bool(self.config.get(CONF_FAN_SENSOR)),
+                "ac_sensor_configured": bool(self.config.get(CONF_AC_SENSOR)),
                 "fan_available": bool(self.config.get(CONF_FAN_AVAILABLE, True)),
                 "ac_available": bool(self.config.get(CONF_AC_AVAILABLE, True)),
                 "ac_setpoint": self._get_ac_setpoint(),

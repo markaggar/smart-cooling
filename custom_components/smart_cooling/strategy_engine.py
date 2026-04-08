@@ -415,12 +415,20 @@ class StrategyEngine:
             parts.append(f"Room is {indoor_temp:.1f}°F, within comfort range of {target_temp:.1f}°F target")
 
         window_open = conditions.get("window_open", False) if conditions else False
+        window_sensor_configured = conditions.get("window_sensor_configured", True) if conditions else True
         if ac_running:
             parts.append("AC is already running and keeping up")
         elif fan_running:
             parts.append("Fan is running effectively")
         elif outdoor_temp < indoor_temp:
-            if window_open:
+            if not window_sensor_configured:
+                # No window sensor — don't claim to know whether window is open or closed
+                diff = indoor_temp - outdoor_temp
+                parts.append(
+                    f"Outside is {outdoor_temp:.1f}°F ({diff:.1f}°F cooler — "
+                    f"room is cooling slowly through walls)"
+                )
+            elif window_open:
                 parts.append(f"Outside air ({outdoor_temp:.1f}°F) is cooler and providing passive cooling")
             else:
                 diff = indoor_temp - outdoor_temp
