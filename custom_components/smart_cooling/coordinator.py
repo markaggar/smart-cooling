@@ -540,29 +540,30 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 active_strategy = "natural"
 
             # Second prediction: what is the room temperature at target time if the
-            # recommendation is followed right now?  (no-action prediction above only
-            # models passive heat transfer through closed walls.)
-            if "fan" in cooling_method:
-                action_prediction_strategy: str | None = "fan"
-            elif "ac" in cooling_method:
-                action_prediction_strategy = "ac"
-            elif cooling_method == "no_action":
-                # No action — continue whatever is already running so the
-                # "With Recommendation" sensor reflects current trajectory,
-                # not a hypothetical closed-window/passive scenario.
-                action_prediction_strategy = existing_strategy
-            elif "close" in cooling_method:
-                # Explicit close-window recommendation — model passive (no cooling)
-                action_prediction_strategy = None
+            # recommendation is followed right now?
+            # For no_action, reuse the already-computed prediction — it already
+            # models the current device state correctly, and avoids the AC-setpoint
+            # clamp producing a misleading value when the AC sensor reads "on" but
+            # the AC isn't actually cooling toward its setpoint.
+            if cooling_method == "no_action":
+                with_action_prediction = prediction
             else:
-                # open_window, keep_window_open
-                action_prediction_strategy = "natural"
+                if "fan" in cooling_method:
+                    action_prediction_strategy: str | None = "fan"
+                elif "ac" in cooling_method:
+                    action_prediction_strategy = "ac"
+                elif "close" in cooling_method:
+                    # Explicit close-window — model passive (no cooling)
+                    action_prediction_strategy = None
+                else:
+                    # open_window, keep_window_open
+                    action_prediction_strategy = "natural"
 
-            with_action_prediction = self.thermal_model.predict_temperature(
-                current_conditions=current_conditions,
-                hours_ahead=hours_to_target,
-                cooling_strategy=action_prediction_strategy,
-            )
+                with_action_prediction = self.thermal_model.predict_temperature(
+                    current_conditions=current_conditions,
+                    hours_ahead=hours_to_target,
+                    cooling_strategy=action_prediction_strategy,
+                )
 
             # 24-hour peak predictions: how hot will the room get in the next 24h
             # with the window open (natural ventilation) vs. closed (walls only)?
