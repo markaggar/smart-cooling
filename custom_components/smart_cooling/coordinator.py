@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -182,6 +183,72 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         
         return []
 
+    def _apply_forecast_bias_correction(
+        self, forecast: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Correct near-term forecast temperatures using the actual outdoor sensor.
+
+        The actual sensor reading is more accurate than the forecast model for the
+        current hour.  We compute an offset (actual − forecast_hour_0_temp) and
+        apply it to each forecast item with exponential decay so that the correction
+        fades to zero by roughly 6 hours out.
+
+        Returns a new list; items without a "temperature" key are passed through
+        unchanged.
+        """
+        if not forecast:
+            return forecast
+
+        outdoor_sensor = self.config.get(CONF_OUTDOOR_TEMP_SENSOR)
+        if not outdoor_sensor:
+            return forecast
+
+        # Read actual sensor value; bail if unavailable
+        actual_state = self.hass.states.get(outdoor_sensor)
+        if actual_state is None or actual_state.state in ("unknown", "unavailable"):
+            return forecast
+        try:
+            actual_temp = float(actual_state.state)
+        except (TypeError, ValueError):
+            return forecast
+
+        # Forecast temperature for the current (first) hour
+        try:
+            forecast_now_temp = float(forecast[0].get("temperature", actual_temp))
+        except (TypeError, ValueError):
+            return forecast
+
+        offset = actual_temp - forecast_now_temp
+        if abs(offset) < 0.5:
+            # Trivial difference — not worth touching the forecast
+            return forecast
+
+        # Decay constant: offset halves every ~2 hours (e^(-ln2/2 * t))
+        decay_half_life_hours = 2.0
+
+        corrected: list[dict[str, Any]] = []
+        for i, entry in enumerate(forecast):
+            if "temperature" not in entry:
+                corrected.append(entry)
+                continue
+            try:
+                orig_temp = float(entry["temperature"])
+            except (TypeError, ValueError):
+                corrected.append(entry)
+                continue
+            decay = math.exp(-math.log(2) / decay_half_life_hours * i)
+            new_entry = dict(entry)
+            new_entry["temperature"] = round(orig_temp + offset * decay, 2)
+            corrected.append(new_entry)
+
+        if abs(offset) > 1.0:
+            _LOGGER.debug(
+                "%s: forecast bias correction %.1f°F at hour 0, decaying over ~6h",
+                self.room_name,
+                offset,
+            )
+        return corrected
+
     def _get_current_wind_speed(self, forecast: list[dict[str, Any]]) -> float:
         """Extract current wind speed from the first hourly forecast item."""
         if not forecast:
@@ -258,6 +325,13 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Get hourly forecast (includes wind_speed per forecast item)
             forecast = await self._get_hourly_forecast()
+
+            # Forecast bias correction (decaying offset).
+            # The actual outdoor-temp sensor is more reliable than the forecast
+            # for the current hour. Compute the gap and apply it to near-term
+            # forecast temperatures with an exponential decay over ~6 hours.
+            forecast = self._apply_forecast_bias_correction(forecast)
+
             current_wind_speed = self._get_current_wind_speed(forecast)
             current_outdoor_humidity = self._get_current_outdoor_humidity(forecast)
             current_wind_bearing = self._get_current_wind_bearing(forecast)

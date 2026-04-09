@@ -424,7 +424,7 @@ class SmartCoolingConfidenceSensor(SmartCoolingBaseSensor):
 
 
 class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
-    """Sensor reporting the count and entity IDs of all configured inputs for this room."""
+    """Sensor reporting the count and live states of all configured inputs for this room."""
 
     _attr_icon = "mdi:format-list-checks"
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -436,14 +436,14 @@ class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
         super().__init__(coordinator, entry, "configured_sensors", "Configured Sensors")
 
     def _get_all_slots(self) -> dict[str, str | None]:
-        """Return a flat dict of slot_name -> entity_id for global + per-room config.
+        """Return slot_name -> entity_id for all configured slots.
 
-        coordinator.config is already the merged view (global keys overlaid onto
+        coordinator.config is the merged view (global keys overlaid onto
         per-room entry data), so one lookup covers everything.
         """
         cfg: dict = self.coordinator.config
         return {
-            # Global sensors (shared across all rooms)
+            # Global sensors
             "weather_entity": cfg.get(CONF_WEATHER_ENTITY),
             "outdoor_temp_sensor": cfg.get(CONF_OUTDOOR_TEMP_SENSOR),
             "aqi_sensor": cfg.get(CONF_AQI_SENSOR),
@@ -461,6 +461,15 @@ class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
             ),
         }
 
+    def _state_of(self, entity_id: str | None) -> str | None:
+        """Return the current HA state string for an entity, or None if not configured."""
+        if not entity_id:
+            return None
+        state = self.coordinator.hass.states.get(entity_id)
+        if state is None:
+            return "unavailable"
+        return state.state
+
     @property
     def native_value(self) -> int:
         """Return the count of slots that have an entity ID configured."""
@@ -468,5 +477,8 @@ class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return all slot → entity_id mappings (None when not configured)."""
-        return self._get_all_slots()
+        """Return live state of each configured sensor slot (None when not configured)."""
+        return {
+            slot: self._state_of(entity_id)
+            for slot, entity_id in self._get_all_slots().items()
+        }
