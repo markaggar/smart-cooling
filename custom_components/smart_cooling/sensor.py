@@ -141,6 +141,7 @@ class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
     _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
     _attr_suggested_display_precision = 1
     _attr_icon = "mdi:thermometer"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
@@ -188,6 +189,7 @@ class SmartCoolingPredictedWithActionSensor(SmartCoolingBaseSensor):
     _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
     _attr_suggested_display_precision = 1
     _attr_icon = "mdi:thermometer-check"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
@@ -230,6 +232,7 @@ class SmartCoolingDeficitSensor(SmartCoolingBaseSensor):
     _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
     _attr_suggested_display_precision = 1
     _attr_icon = "mdi:thermometer-alert"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
@@ -255,6 +258,7 @@ class SmartCoolingTimeToTargetSensor(SmartCoolingBaseSensor):
     _attr_native_unit_of_measurement = "h"
     _attr_suggested_display_precision = 1
     _attr_icon = "mdi:timer-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
@@ -293,6 +297,7 @@ class SmartCoolingWillReachTargetAtSensor(SmartCoolingBaseSensor):
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:thermometer-check"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
@@ -350,6 +355,7 @@ class SmartCoolingReasoningSensor(SmartCoolingBaseSensor):
     """Sensor explaining why the current recommendation was made."""
 
     _attr_icon = "mdi:chat-question-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
@@ -397,6 +403,7 @@ class SmartCoolingConfidenceSensor(SmartCoolingBaseSensor):
     _attr_native_unit_of_measurement = "%"
     _attr_suggested_display_precision = 0
     _attr_icon = "mdi:chart-line"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
