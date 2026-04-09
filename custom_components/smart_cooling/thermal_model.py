@@ -270,12 +270,16 @@ class ThermalModel:
             net_change = heat_gain - cooling
             simulated_temp += net_change
 
-            # Background AC protection: the current setpoint is a ceiling for
-            # non-AC strategies. The thermostat prevents the room rising above it
-            # when we simulate fan/natural/no-action scenarios.
-            ac_setpoint = current_conditions.get("ac_setpoint")
-            if cooling_strategy != "ac" and ac_setpoint is not None:
-                simulated_temp = min(simulated_temp, float(ac_setpoint))
+            if cooling_strategy == "ac":
+                # AC won't cool below its new setpoint (the target temp).
+                simulated_temp = max(simulated_temp, float(target_temp))
+            else:
+                # Background AC protection: the current setpoint is a ceiling for
+                # non-AC strategies. The thermostat prevents the room rising above it
+                # when we simulate fan/natural/no-action scenarios.
+                ac_setpoint = current_conditions.get("ac_setpoint")
+                if ac_setpoint is not None:
+                    simulated_temp = min(simulated_temp, float(ac_setpoint))
 
             hourly_predictions.append({
                 "hour": hour,
@@ -483,8 +487,13 @@ class ThermalModel:
             net_change = heat_gain - cooling
             simulated_temp += net_change
 
-            # Background AC protection: ceiling for non-AC strategies.
-            if cooling_strategy != "ac" and ac_setpoint is not None:
+            if cooling_strategy == "ac":
+                # AC won't cool below its new setpoint (the target temp).
+                target_temp_val = current_conditions.get("target_temp")
+                if target_temp_val is not None:
+                    simulated_temp = max(simulated_temp, float(target_temp_val))
+            elif ac_setpoint is not None:
+                # Background AC protection: ceiling for non-AC strategies.
                 simulated_temp = min(simulated_temp, float(ac_setpoint))
 
             if simulated_temp > peak_temp:
