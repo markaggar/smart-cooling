@@ -470,6 +470,15 @@ class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
             return "unavailable"
         return state.state
 
+    def _slot_info(self, entity_id: str | None) -> dict[str, str | None] | None:
+        """Return {state, entity_id} for a slot, or None if not configured."""
+        if not entity_id:
+            return None
+        return {
+            "state": self._state_of(entity_id),
+            "entity_id": entity_id,
+        }
+
     @property
     def native_value(self) -> int:
         """Return the count of slots that have an entity ID configured."""
@@ -477,8 +486,8 @@ class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return live state of each configured sensor slot (None when not configured)."""
+        """Return {state, entity_id} for each configured slot (None when not configured)."""
         return {
-            slot: self._state_of(entity_id)
+            slot: self._slot_info(entity_id)
             for slot, entity_id in self._get_all_slots().items()
         }

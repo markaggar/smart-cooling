@@ -136,33 +136,59 @@ peak_at_open: '2026-04-08T14:30:00'     # when that peak occurs
 
 ```yaml
 # State: 9  (9 out of 11 possible slots are configured)
-weather_entity: sunny          # current weather entity state
-outdoor_temp_sensor: "81.3"   # current outdoor temperature
-aqi_sensor: "42"               # current AQI reading
-indoor_temp_sensor: "74.6"    # room temperature
-indoor_humidity_sensor: null   # not configured → null
-window_sensor: "off"           # window closed
-fan_sensor: "off"              # fan off
-ac_sensor: "on"                # AC running
-ac_setpoint_entity: "72.0"    # AC thermostat setpoint
-target_temp_entity: "70.0"    # desired target temperature
-target_time_entity: "22:30:00" # deadline
+weather_entity:
+  state: sunny
+  entity_id: weather.home
+outdoor_temp_sensor:
+  state: "81.3"
+  entity_id: sensor.backyard_temperature
+aqi_sensor:
+  state: "42"
+  entity_id: sensor.air_quality_index
+indoor_temp_sensor:
+  state: "74.6"
+  entity_id: sensor.bedroom_temperature
+indoor_humidity_sensor: null        # not configured → null
+window_sensor:
+  state: "off"
+  entity_id: binary_sensor.bedroom_window
+fan_sensor:
+  state: "off"
+  entity_id: binary_sensor.bedroom_fan
+ac_sensor:
+  state: "on"
+  entity_id: binary_sensor.bedroom_ac
+ac_setpoint_entity:
+  state: "72.0"
+  entity_id: climate.bedroom_ac
+target_temp_entity:
+  state: "70.0"
+  entity_id: input_number.bedroom_target_temp
+target_time_entity:
+  state: "22:30:00"
+  entity_id: input_datetime.bedroom_bedtime
 ```
 
 **Accessing attributes in HA templates:**
 
 ```yaml
-# Current outdoor temperature (from the actual sensor state)
-{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'outdoor_temp_sensor') }}
+# Current state of the outdoor temperature sensor
+{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'outdoor_temp_sensor')['state'] }}
+# → "81.3"
+
+# Entity ID of the outdoor temperature sensor
+{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'outdoor_temp_sensor')['entity_id'] }}
+# → "sensor.backyard_temperature"
 
 # Is the window open?
-{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'window_sensor') == 'on' }}
+{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'window_sensor')['state'] == 'on' }}
 
-# AC setpoint
-{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'ac_setpoint_entity') | float }}
+# AC setpoint as a float (guard against null for unconfigured slots)
+{% set slot = state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'ac_setpoint_entity') %}
+{{ slot['state'] | float if slot else none }}
 ```
 
-Slots that are not configured return `null` in templates (`None` in Python). Slots that are configured but whose entity is unreachable return `"unavailable"`.
+Unconfigured slots return `null` (Python `None`) — always guard with `if slot` before accessing sub-keys. Configured but unreachable entities show `"unavailable"` in the `state` sub-key.
 
 ### Forecast Bias Correction
 
