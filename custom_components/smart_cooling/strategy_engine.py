@@ -399,9 +399,9 @@ class StrategyEngine:
                     "predicted_temp": round(s["prediction"].predicted_bedtime_temp, 1),
                     "hours_to_cool": round(s["hours_to_cool"], 1) if s["hours_to_cool"] is not None else None,
                     "achieves_target": s["achieves_target"],
+                    "chosen": s is best_strategy,
                 }
                 for s in strategies
-                if s is not best_strategy
             ],
         )
 

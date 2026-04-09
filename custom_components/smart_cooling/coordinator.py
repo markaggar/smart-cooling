@@ -691,8 +691,13 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Forecast diagnostics — visible in sensor attributes
                 "forecast_entries": len(forecast),
                 "forecast_sample": [
-                    {"datetime": str(f.get("datetime", "")), "temperature": f.get("temperature")}
-                    for f in forecast[:4]
+                    {
+                        "datetime": str(f.get("datetime", "")),
+                        "temperature": f.get("temperature"),
+                        "wind_speed": f.get("wind_speed"),
+                        "humidity": f.get("humidity"),
+                    }
+                    for f in forecast[:12]
                 ],
             }
             
