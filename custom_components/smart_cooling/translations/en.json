@@ -40,7 +40,10 @@
                     "target_temp_entity": "Target temperature helper (input_number)",
                     "target_time_entity": "Target time helper (input_datetime) - when to reach target",
                     "tolerance_minutes": "Tolerance past target time (minutes) - prefer fan/window over AC if within this window",
-                    "learning_enabled": "Enable learning from predictions"
+                    "learning_enabled": "Enable learning from predictions",
+                    "comfort_end_entity": "Comfort window end time (input_datetime) - wake time / end of overnight comfort period (optional)",
+                    "comfort_tolerance": "Comfort tolerance (°F) - how far above target is still acceptable during the comfort window",
+                    "prefer_ac_during_comfort": "Prefer AC during comfort window - run AC overnight to maintain comfort (disable for quiet bedrooms or rooms without AC)"
                 }
             }
         },
@@ -73,7 +76,10 @@
                     "target_temp_entity": "Target temperature helper",
                     "target_time_entity": "Target time helper",
                     "tolerance_minutes": "Tolerance past target time (minutes)",
-                    "learning_enabled": "Enable learning"
+                    "learning_enabled": "Enable learning",
+                    "comfort_end_entity": "Comfort window end time (wake time, optional)",
+                    "comfort_tolerance": "Comfort tolerance (°F above target)",
+                    "prefer_ac_during_comfort": "Prefer AC during comfort window"
                 }
             },
             "global_settings": {

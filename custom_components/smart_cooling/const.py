@@ -80,6 +80,20 @@ CONF_TEMP_ADVANTAGE_ENTITY: Final = "temp_advantage_entity"
 CONF_MIN_WIND_ENTITY: Final = "min_wind_entity"
 CONF_COMFORT_TOLERANCE_ENTITY: Final = "comfort_tolerance_entity"
 
+# =============================================================================
+# COMFORT WINDOW CONFIGURATION
+# =============================================================================
+# End of the overnight comfort window (e.g. wake time).  When set the integration
+# will predict whether the room stays within tolerance through the whole window
+# and recommend pre-cooling or overnight AC/fan accordingly.
+CONF_COMFORT_END_ENTITY: Final = "comfort_end_entity"  # input_datetime (wake time)
+# Plain °F tolerance — how far above target is still "comfortable" during the window
+CONF_COMFORT_TOLERANCE: Final = "comfort_tolerance"
+DEFAULT_COMFORT_TOLERANCE: Final = 2.0
+# If True, bias toward AC to maintain comfort during the window (can be set to False
+# e.g. for rooms that prefer quiet at night).  Forced False when ac_available=False.
+CONF_PREFER_AC_DURING_COMFORT: Final = "prefer_ac_during_comfort"
+
 # Deprecated - wind speed now comes from weather hourly forecast
 CONF_WIND_SPEED_SENSOR: Final = "wind_speed_sensor"
 CONF_CLOUD_COVERAGE_SENSOR: Final = "cloud_coverage_sensor"

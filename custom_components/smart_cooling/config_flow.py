@@ -35,6 +35,10 @@ from .const import (
     CONF_LEARNING_ENABLED,
     CONF_TOLERANCE_MINUTES,
     DEFAULT_TOLERANCE_MINUTES,
+    CONF_COMFORT_END_ENTITY,
+    CONF_COMFORT_TOLERANCE,
+    DEFAULT_COMFORT_TOLERANCE,
+    CONF_PREFER_AC_DURING_COMFORT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -117,6 +121,15 @@ STEP_ROOM_TARGETS_SCHEMA = vol.Schema(
             selector.NumberSelectorConfig(min=0, max=120, step=5, unit_of_measurement="min"),
         ),
         vol.Optional(CONF_LEARNING_ENABLED, default=True): selector.BooleanSelector(),
+        vol.Optional(CONF_COMFORT_END_ENTITY): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="input_datetime"),
+        ),
+        vol.Optional(
+            CONF_COMFORT_TOLERANCE, default=DEFAULT_COMFORT_TOLERANCE
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=10, step=0.5, unit_of_measurement="°F"),
+        ),
+        vol.Optional(CONF_PREFER_AC_DURING_COMFORT, default=True): selector.BooleanSelector(),
     }
 )
 
@@ -382,6 +395,22 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
         schema_dict[vol.Optional(
             CONF_LEARNING_ENABLED,
             default=current.get(CONF_LEARNING_ENABLED, True),
+        )] = selector.BooleanSelector()
+        schema_dict[vol.Optional(
+            CONF_COMFORT_END_ENTITY,
+            description={"suggested_value": current.get(CONF_COMFORT_END_ENTITY)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="input_datetime"),
+        )
+        schema_dict[vol.Optional(
+            CONF_COMFORT_TOLERANCE,
+            default=current.get(CONF_COMFORT_TOLERANCE, DEFAULT_COMFORT_TOLERANCE),
+        )] = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=10, step=0.5, unit_of_measurement="°F"),
+        )
+        schema_dict[vol.Optional(
+            CONF_PREFER_AC_DURING_COMFORT,
+            default=current.get(CONF_PREFER_AC_DURING_COMFORT, True),
         )] = selector.BooleanSelector()
 
         return self.async_show_form(

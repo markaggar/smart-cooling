@@ -392,6 +392,117 @@ class ThermalModel:
 
         return None  # Not reachable within max_hours
 
+    def simulate_comfort_window(
+        self,
+        current_conditions: dict[str, Any],
+        start_temp: float,
+        start_time: datetime,
+        window_hours: float,
+        cooling_strategy: str | None = None,
+    ) -> dict[str, Any]:
+        """Simulate temperature over the comfort window (e.g. midnight → wake time).
+
+        Args:
+            current_conditions: Standard conditions dict (for forecast, sensors, etc.)
+            start_temp: Indoor temperature at the *start* of the comfort window.
+            start_time: Datetime when the comfort window begins.
+            window_hours: Duration of the window in hours.
+            cooling_strategy: Active cooling strategy during the window
+                (None = passive, "ac", "fan", "natural").
+
+        Returns a dict with:
+          peak_temp    – highest predicted temp during the window (°F)
+          peak_at      – ISO datetime string when peak occurs
+          end_temp     – predicted temp at the end of the window
+          hourly_predictions – list of hourly step dicts
+        """
+        forecast = current_conditions.get("forecast", [])
+        ac_setpoint = current_conditions.get("ac_setpoint")
+        outdoor_temp_default = current_conditions.get("outdoor_temp", 70.0)
+        outdoor_humidity_default = current_conditions.get("outdoor_humidity", 50.0)
+        wind_speed_default = current_conditions.get("wind_speed", 0.0)
+        wind_bearing_default = current_conditions.get("wind_bearing")
+        window_facing = current_conditions.get("window_facing", [])
+
+        simulated_temp = start_temp
+        hourly_predictions: list[dict[str, Any]] = []
+        peak_temp = start_temp
+        peak_at = start_time.isoformat()
+
+        hours_to_simulate = int(window_hours) + 1
+
+        for i in range(hours_to_simulate):
+            future_time = start_time + timedelta(hours=i)
+            hour = future_time.hour
+
+            forecast_data = self._get_forecast_for_hour(forecast, future_time)
+            hour_outdoor_temp = forecast_data.get("temperature", outdoor_temp_default)
+            cloud_coverage = forecast_data.get("cloud_coverage", 50.0)
+            uv_index = forecast_data.get("uv_index", 0.0)
+            hour_humidity = forecast_data.get("humidity", outdoor_humidity_default)
+
+            heat_gain = self.calculate_heat_gain(
+                hour=hour,
+                outdoor_temp=hour_outdoor_temp,
+                indoor_temp=simulated_temp,
+                cloud_coverage=cloud_coverage,
+                uv_index=uv_index,
+            )
+
+            cooling = 0.0
+            if cooling_strategy == "fan":
+                hour_wind = forecast_data.get("wind_speed", wind_speed_default)
+                hour_bearing = forecast_data.get("wind_bearing", wind_bearing_default)
+                alignment = wind_alignment_factor(hour_bearing, window_facing)
+                cooling = self.calculate_fan_cooling_rate(
+                    hour_outdoor_temp, simulated_temp,
+                    wind_speed=float(hour_wind) * alignment,
+                    outdoor_humidity=float(hour_humidity),
+                )
+            elif cooling_strategy == "ac":
+                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
+            elif cooling_strategy == "natural":
+                temp_diff = simulated_temp - hour_outdoor_temp
+                if temp_diff > 0:
+                    hour_wind = forecast_data.get("wind_speed", wind_speed_default)
+                    hour_bearing = forecast_data.get("wind_bearing", wind_bearing_default)
+                    alignment = wind_alignment_factor(hour_bearing, window_facing)
+                    wind_factor = max(float(hour_wind) * alignment, 0.3) / 10.0
+                    humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
+                    cooling = (
+                        temp_diff
+                        * self.params["natural_cooling_effectiveness"]
+                        * wind_factor
+                        * humidity_factor
+                    )
+
+            net_change = heat_gain - cooling
+            simulated_temp += net_change
+
+            if cooling_strategy == "ac" and ac_setpoint is not None:
+                simulated_temp = max(simulated_temp, float(ac_setpoint))
+
+            if simulated_temp > peak_temp:
+                peak_temp = simulated_temp
+                peak_at = future_time.isoformat()
+
+            hourly_predictions.append({
+                "hour": hour,
+                "time": future_time.isoformat(),
+                "predicted_temp": round(simulated_temp, 1),
+                "outdoor_temp": hour_outdoor_temp,
+                "heat_gain": round(heat_gain, 2),
+                "cooling": round(cooling, 2),
+                "net_change": round(net_change, 2),
+            })
+
+        return {
+            "peak_temp": round(peak_temp, 1),
+            "peak_at": peak_at,
+            "end_temp": round(simulated_temp, 1),
+            "hourly_predictions": hourly_predictions,
+        }
+
     def _get_forecast_for_hour(
         self, forecast: list[dict], target_time: datetime
     ) -> dict[str, Any]:

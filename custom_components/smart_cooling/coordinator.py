@@ -35,6 +35,10 @@ from .const import (
     CONF_TOLERANCE_MINUTES,
     DEFAULT_TOLERANCE_MINUTES,
     CONF_AC_SETPOINT_ENTITY,
+    CONF_COMFORT_END_ENTITY,
+    CONF_COMFORT_TOLERANCE,
+    DEFAULT_COMFORT_TOLERANCE,
+    CONF_PREFER_AC_DURING_COMFORT,
 )
 from .thermal_model import ThermalModel
 from .strategy_engine import StrategyEngine
@@ -410,11 +414,121 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             tolerance_minutes = int(
                 self.config.get(CONF_TOLERANCE_MINUTES, DEFAULT_TOLERANCE_MINUTES)
             )
+
+            # ----- Comfort window calculations -----
+            # Determines overnight phase, simulates comfort-window temperature drift,
+            # and builds comfort_data for the strategy engine.  Fully backward-
+            # compatible: when no comfort_end_entity is configured nothing changes.
+            now = dt_util.now()
+            comfort_phase: str | None = None
+            window_peak_temp: float | None = None
+            window_peak_at: str | None = None
+            required_start_temp: float | None = None
+            comfort_data: dict[str, Any] | None = None
+
+            comfort_end_entity = self.config.get(CONF_COMFORT_END_ENTITY)
+            if comfort_end_entity:
+                comfort_tolerance_val = float(
+                    self.config.get(CONF_COMFORT_TOLERANCE, DEFAULT_COMFORT_TOLERANCE)
+                )
+                ac_available_flag = bool(self.config.get(CONF_AC_AVAILABLE, True))
+                prefer_ac = (
+                    bool(self.config.get(CONF_PREFER_AC_DURING_COMFORT, True))
+                    and ac_available_flag
+                )
+
+                comfort_end_str = self._get_time_value(comfort_end_entity, "06:00:00")
+                target_dt = now + timedelta(hours=hours_to_target)
+                comfort_end_dt = self._parse_time_to_datetime_after(
+                    comfort_end_str, target_dt
+                )
+
+                # Build a human-readable label for use in reasoning strings
+                try:
+                    ce_time = datetime.strptime(comfort_end_str, "%H:%M:%S").time()
+                    hour12 = ce_time.hour % 12 or 12
+                    ampm = "AM" if ce_time.hour < 12 else "PM"
+                    comfort_end_label = f"{hour12}:{ce_time.minute:02d} {ampm}"
+                except ValueError:
+                    comfort_end_label = "wake time"
+
+                if comfort_end_dt is not None:
+                    window_duration_hours = max(
+                        0.0, (comfort_end_dt - target_dt).total_seconds() / 3600
+                    )
+
+                    if now < target_dt:
+                        comfort_phase = "pre_window"
+                    elif now < comfort_end_dt:
+                        comfort_phase = "during_window"
+                    else:
+                        comfort_phase = "post_window"
+
+                    if comfort_phase == "pre_window" and window_duration_hours > 0:
+                        # Simulate comfort-window drift starting from target_temp using
+                        # the preferred overnight strategy.  For the passive (no-AC) case
+                        # this tells us how far the room will drift above target, and how
+                        # much we need to pre-cool to compensate.
+                        window_strategy: str | None = "ac" if prefer_ac else None
+                        sim = self.thermal_model.simulate_comfort_window(
+                            current_conditions=current_conditions,
+                            start_temp=float(current_conditions["target_temp"]),
+                            start_time=target_dt,
+                            window_hours=window_duration_hours,
+                            cooling_strategy=window_strategy,
+                        )
+                        window_peak_temp = sim["peak_temp"]
+                        window_peak_at = sim["peak_at"]
+
+                        if not prefer_ac:
+                            passive_overshoot = window_peak_temp - (
+                                float(current_conditions["target_temp"]) + comfort_tolerance_val
+                            )
+                            if passive_overshoot > 0:
+                                # Cap pre-cool demand at 8°F below target
+                                required_start_temp = float(current_conditions["target_temp"]) - min(
+                                    passive_overshoot, 8.0
+                                )
+
+                    elif comfort_phase == "during_window":
+                        remaining_hours = max(
+                            0.0, (comfort_end_dt - now).total_seconds() / 3600
+                        )
+                        if remaining_hours > 0:
+                            if prefer_ac:
+                                during_strategy: str | None = "ac"
+                            elif current_conditions.get("fan_running"):
+                                during_strategy = "fan"
+                            elif current_conditions.get("window_open"):
+                                during_strategy = "natural"
+                            else:
+                                during_strategy = None
+                            sim = self.thermal_model.simulate_comfort_window(
+                                current_conditions=current_conditions,
+                                start_temp=float(current_conditions["indoor_temp"]),
+                                start_time=now,
+                                window_hours=remaining_hours,
+                                cooling_strategy=during_strategy,
+                            )
+                            window_peak_temp = sim["peak_temp"]
+                            window_peak_at = sim["peak_at"]
+
+                    if comfort_phase in ("pre_window", "during_window"):
+                        comfort_data = {
+                            "phase": comfort_phase,
+                            "comfort_tolerance": comfort_tolerance_val,
+                            "window_peak_temp": window_peak_temp,
+                            "prefer_ac": prefer_ac,
+                            "required_start_temp": required_start_temp,
+                            "comfort_end_label": comfort_end_label,
+                        }
+
             strategy = self.strategy_engine.recommend(
                 current_conditions=current_conditions,
                 prediction=prediction,
                 tolerance_minutes=tolerance_minutes,
-)
+                comfort_data=comfort_data,
+            )
 
             # Estimate time to reach target with the recommended cooling method
             cooling_method = strategy.method.value  # e.g. "start_fan", "start_ac", etc.
@@ -496,8 +610,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cooling_strategy=active_strategy,
             )
 
-            now = dt_util.now()
-
+            # `now` was defined earlier (comfort window block) — reuse it here.
             def _round_to_5min(dt: datetime) -> datetime:
                 """Round a datetime to the nearest 5-minute mark to reduce sensor churn."""
                 total_seconds = (dt.hour * 3600 + dt.minute * 60 + dt.second)
@@ -564,6 +677,11 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "hours_until_cool": hours_until_cool,
                 "will_reach_target_at": will_reach_target_at,
                 "action_needed_by": action_needed_by,
+                # Comfort window data
+                "comfort_phase": comfort_phase,
+                "window_peak_temp": window_peak_temp,
+                "window_peak_at": window_peak_at,
+                "required_start_temp": required_start_temp,
                 # Forecast diagnostics — visible in sensor attributes
                 "forecast_entries": len(forecast),
                 "forecast_sample": [
@@ -588,6 +706,26 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return (target_today - now).total_seconds() / 3600
         except ValueError:
             return 8.0  # Default 8 hours
+
+    def _parse_time_to_datetime_after(
+        self, time_str: str, after: datetime
+    ) -> datetime | None:
+        """Return the next datetime matching time_str that occurs after `after`.
+
+        Handles overnight wrap-around: e.g. target_time=22:30, comfort_end=06:00
+        will return tomorrow at 06:00 even when `after` is tomorrow at 22:30.
+        """
+        try:
+            t = datetime.strptime(time_str, "%H:%M:%S").time()
+            # Build a tz-aware candidate matching `after`'s date/tz
+            candidate = after.replace(
+                hour=t.hour, minute=t.minute, second=0, microsecond=0
+            )
+            if candidate <= after:
+                candidate += timedelta(days=1)
+            return candidate
+        except ValueError:
+            return None
 
     async def async_calibrate_from_history(self, days: int = 30) -> dict[str, Any]:
         """Pull history from HA recorder and tune physics parameters.

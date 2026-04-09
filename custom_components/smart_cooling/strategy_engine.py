@@ -88,12 +88,20 @@ class StrategyEngine:
         current_conditions: dict[str, Any],
         prediction: TemperaturePrediction,
         tolerance_minutes: int = 30,
+        comfort_data: dict[str, Any] | None = None,
     ) -> CoolingStrategy:
         """Determine the best cooling strategy.
-        
+
         Tolerance-aware priority: if a lower-energy method (fan/window) can reach
         target within target_time + tolerance_minutes, prefer it over AC.
         Priority: natural > fan > AC
+
+        comfort_data (optional) describes the overnight comfort window:
+          phase               – "pre_window" | "during_window" | None
+          window_peak_temp    – predicted peak during the comfort window
+          target_temp         – target (may be adjusted to required_start_temp pre-window)
+          comfort_tolerance   – °F above target still considered comfortable
+          prefer_ac           – bias toward AC for overnight maintenance
         """
         indoor_temp = current_conditions.get("indoor_temp", 72.0)
         outdoor_temp = current_conditions.get("outdoor_temp", 70.0)
@@ -266,6 +274,77 @@ class StrategyEngine:
         elif method == CoolingMethod.OPEN_WINDOW and window_open:
             method = CoolingMethod.KEEP_WINDOW_OPEN
 
+        # --- Comfort window adjustments ---
+        # Override strategy and add context note when overnight comfort data is available.
+        comfort_note: str | None = None
+
+        if comfort_data:
+            phase = comfort_data.get("phase")
+            comfort_tolerance_val = float(comfort_data.get("comfort_tolerance", 2.0))
+            window_peak_temp = comfort_data.get("window_peak_temp")
+            prefer_ac = comfort_data.get("prefer_ac", True) and ac_available
+            required_start_temp = comfort_data.get("required_start_temp")
+            comfort_end_label = comfort_data.get("comfort_end_label", "wake time")
+
+            if phase == "pre_window" and required_start_temp is not None and window_peak_temp is not None:
+                overshoot = window_peak_temp - (target_temp + comfort_tolerance_val)
+                if overshoot > 0:
+                    comfort_note = (
+                        f"Comfort window: pre-cool to {required_start_temp:.1f}°F before "
+                        f"target time to prevent overnight peak of ~{window_peak_temp:.1f}°F"
+                    )
+                else:
+                    comfort_note = (
+                        f"Comfort window: predicted overnight peak {window_peak_temp:.1f}°F "
+                        f"is within {comfort_tolerance_val:.1f}°F of target — "
+                        f"no extra pre-cooling needed"
+                    )
+
+            elif phase == "during_window" and window_peak_temp is not None:
+                will_exceed = window_peak_temp > target_temp + comfort_tolerance_val
+                if not will_exceed:
+                    comfort_note = (
+                        f"Comfort window: predicted peak {window_peak_temp:.1f}°F stays within "
+                        f"{comfort_tolerance_val:.1f}°F of {target_temp:.0f}°F target "
+                        f"through {comfort_end_label}"
+                    )
+                else:
+                    overshoot = window_peak_temp - (target_temp + comfort_tolerance_val)
+                    if prefer_ac:
+                        if method not in (CoolingMethod.START_AC, CoolingMethod.CONTINUE_AC):
+                            method = CoolingMethod.CONTINUE_AC if ac_running else CoolingMethod.START_AC
+                        comfort_note = (
+                            f"Comfort window: predicted peak {window_peak_temp:.1f}°F exceeds "
+                            f"target by {overshoot:.1f}°F — running AC to maintain comfort "
+                            f"through {comfort_end_label}"
+                        )
+                    else:
+                        # Fan/window preferred overnight (quiet or no AC)
+                        if method == CoolingMethod.NO_ACTION:
+                            if fan_available and aqi_ok:
+                                method = CoolingMethod.CONTINUE_FAN if fan_running else CoolingMethod.START_FAN
+                            elif aqi_ok:
+                                method = CoolingMethod.KEEP_WINDOW_OPEN if window_open else CoolingMethod.OPEN_WINDOW
+                        if overshoot > 3.0:
+                            comfort_note = (
+                                f"Comfort window: predicted peak {window_peak_temp:.1f}°F is "
+                                f"{overshoot:.1f}°F above comfort range — fan/window may be "
+                                f"insufficient; consider enabling AC for overnight maintenance"
+                            )
+                        else:
+                            comfort_note = (
+                                f"Comfort window: predicted peak {window_peak_temp:.1f}°F is "
+                                f"{overshoot:.1f}°F above comfort range — using fan/window "
+                                f"to reduce overnight temperature"
+                            )
+
+        # --- Fan requires window open note ---
+        # Window fans must work with an open window.  When recommending START_FAN but
+        # the window is currently closed, add a reminder to open it too.
+        fan_window_note: str | None = None
+        if method in (CoolingMethod.START_FAN,) and not window_open:
+            fan_window_note = "open window and start fan"
+
         # --- Lazy-start timing ---
         # If we have buffer before we must act, tell the user when to start rather
         # than shouting "NOW!" for the entire afternoon.
@@ -280,8 +359,10 @@ class StrategyEngine:
             # strftime %-I is Linux-only; strip leading zero manually for cross-platform
             hour_str = start_by.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
             timing = f"by {hour_str}"
+            if fan_window_note:
+                timing = f"{fan_window_note} by {hour_str}"
         elif best_strategy["achieves_target"]:
-            timing = "NOW!"
+            timing = f"{fan_window_note} NOW!" if fan_window_note else "NOW!"
         elif not ac_available:
             timing = "— target temperature may not be reachable"
         else:
@@ -302,6 +383,8 @@ class StrategyEngine:
             fan_available=fan_available,
             ac_available=ac_available,
         )
+        if comfort_note:
+            reasoning = reasoning.rstrip(".") + ". " + comfort_note + "."
 
         return CoolingStrategy(
             method=method,
