@@ -611,10 +611,17 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 peak_24h_open_pred.hourly_predictions
             )
 
-            hours_until_cool = self.thermal_model.find_hours_to_cool_to_target(
-                current_conditions=current_conditions,
-                cooling_strategy=active_strategy,
-            )
+            # Use timing data from the strategy engine's forward scan.
+            # strat_start = hours from now until the action must start (latest deadline).
+            # strat_cool  = hours to cool once the strategy is running.
+            strat_start = strategy.start_hours_from_now
+            strat_cool = strategy.strategy_hours_to_cool
+            if strat_start is not None and strat_cool is not None:
+                hours_until_cool = strat_start + strat_cool
+            elif strat_cool is not None:
+                hours_until_cool = strat_cool
+            else:
+                hours_until_cool = None
 
             # `now` was defined earlier (comfort window block) — reuse it here.
             def _round_to_5min(dt: datetime) -> datetime:
@@ -644,12 +651,11 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             no_action = strategy.method.value == "no_action"
             if no_action or (hours_until_cool is not None and hours_until_cool <= 0.0):
                 action_needed_by = None
-            elif hours_until_cool is not None:
-                # You can delay starting by (budget - time_it_takes)
-                delay_budget = hours_to_target + tolerance_hours - hours_until_cool
-                action_needed_by = _round_to_5min(now + timedelta(hours=max(0.0, delay_budget)))
+            elif strat_start is not None:
+                # Derived directly from the forward scan: latest viable start time
+                action_needed_by = _round_to_5min(now + timedelta(hours=max(0.0, strat_start)))
             else:
-                # Can't reach target — action needed immediately
+                # Strategy achieves_target is False — action needed immediately
                 action_needed_by = _round_to_5min(now)
             
             # Check if any earlier predictions' target time has now passed and

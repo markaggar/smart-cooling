@@ -38,7 +38,10 @@ class CoolingStrategy:
     
     # Comparison data for alternative strategies
     alternatives: list[dict[str, Any]] | None = None
-    
+    # Forward-scan timing: hours from NOW until action must start, and run duration
+    start_hours_from_now: float | None = None   # latest deadline to start (hours)
+    strategy_hours_to_cool: float | None = None  # cooling duration once started
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for HA state attributes."""
         return {
@@ -48,6 +51,8 @@ class CoolingStrategy:
             "target_temp": round(self.target_temp, 1),
             "reasoning": self.reasoning,
             "confidence": round(self.confidence, 2),
+            "start_hours_from_now": round(self.start_hours_from_now, 2) if self.start_hours_from_now is not None else None,
+            "strategy_hours_to_cool": round(self.strategy_hours_to_cool, 1) if self.strategy_hours_to_cool is not None else None,
             "alternatives": self.alternatives,
         }
 
@@ -174,16 +179,18 @@ class StrategyEngine:
 
         strategies = []
 
+        # Passive no-action hourly temps used as the baseline for the forward scan.
+        # This is the "no extra devices" trajectory — what happens if nothing changes.
+        no_action_hourly = prediction.hourly_predictions
+
         # Evaluate natural cooling (open window, no fan).
-        # Don't gate on current outdoor temp — forecast may show outdoor dropping
-        # well below target later; find_hours_to_cool_to_target uses hourly forecast
-        # and returns None only if target is unreachable within 24h.
+        # Forward scan: find the LATEST hour at which opening the window can still
+        # achieve target.  Only considers hours where outdoor is ≥ min_temp_advantage
+        # cooler than the predicted indoor temp at that time.
         if aqi_ok:
-            natural_h = self.thermal_model.find_hours_to_cool_to_target(
-                current_conditions, "natural",
-            )
-            natural_within_tolerance = (
-                natural_h is not None and natural_h <= (hours_to_target + tolerance_hours)
+            natural_result = self._find_latest_viable_start(
+                "natural", current_conditions, no_action_hourly,
+                hours_to_target, tolerance_hours, check_outdoor_advantage=True,
             )
             natural_prediction = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
@@ -193,17 +200,16 @@ class StrategyEngine:
             strategies.append({
                 "method": CoolingMethod.OPEN_WINDOW,
                 "prediction": natural_prediction,
-                "hours_to_cool": natural_h,
-                "achieves_target": natural_within_tolerance,
+                "hours_to_cool": natural_result["hours_to_cool"] if natural_result else None,
+                "start_hours_from_now": natural_result["start_hours_from_now"] if natural_result else None,
+                "achieves_target": natural_result is not None,
             })
 
-        # Evaluate fan cooling
+        # Evaluate fan cooling — same forward scan with outdoor advantage check.
         if aqi_ok and fan_available:
-            fan_h = self.thermal_model.find_hours_to_cool_to_target(
-                current_conditions, "fan",
-            )
-            fan_within_tolerance = (
-                fan_h is not None and fan_h <= (hours_to_target + tolerance_hours)
+            fan_result = self._find_latest_viable_start(
+                "fan", current_conditions, no_action_hourly,
+                hours_to_target, tolerance_hours, check_outdoor_advantage=True,
             )
             fan_prediction = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
@@ -213,17 +219,16 @@ class StrategyEngine:
             strategies.append({
                 "method": CoolingMethod.START_FAN,
                 "prediction": fan_prediction,
-                "hours_to_cool": fan_h,
-                "achieves_target": fan_within_tolerance,
+                "hours_to_cool": fan_result["hours_to_cool"] if fan_result else None,
+                "start_hours_from_now": fan_result["start_hours_from_now"] if fan_result else None,
+                "achieves_target": fan_result is not None,
             })
 
-        # Evaluate AC cooling (always evaluated unless AC is not available)
+        # Evaluate AC cooling — no outdoor advantage requirement; AC works any time.
         if ac_available:
-            ac_h = self.thermal_model.find_hours_to_cool_to_target(
-                current_conditions, "ac",
-            )
-            ac_within_tolerance = (
-                ac_h is not None and ac_h <= (hours_to_target + tolerance_hours)
+            ac_result = self._find_latest_viable_start(
+                "ac", current_conditions, no_action_hourly,
+                hours_to_target, tolerance_hours, check_outdoor_advantage=False,
             )
             ac_prediction = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
@@ -233,8 +238,9 @@ class StrategyEngine:
             strategies.append({
                 "method": CoolingMethod.START_AC,
                 "prediction": ac_prediction,
-                "hours_to_cool": ac_h,
-                "achieves_target": ac_within_tolerance,
+                "hours_to_cool": ac_result["hours_to_cool"] if ac_result else None,
+                "start_hours_from_now": ac_result["start_hours_from_now"] if ac_result else None,
+                "achieves_target": ac_result is not None,
             })
 
         # Select best strategy (prefer energy efficiency — first that achieves within tolerance)
@@ -345,18 +351,16 @@ class StrategyEngine:
         if method in (CoolingMethod.START_FAN,) and not window_open:
             fan_window_note = "open window and start fan"
 
-        # --- Lazy-start timing ---
-        # If we have buffer before we must act, tell the user when to start rather
-        # than shouting "NOW!" for the entire afternoon.
-        tolerance_hours = tolerance_minutes / 60.0
-        hours_until_cool = best_strategy.get("hours_to_cool") or 0.0
-        delay_budget = hours_to_target + tolerance_hours - hours_until_cool
-        deferred_minutes = 15  # act if ≤15 min of budget left
+        # --- Timing based on latest viable start from forward scan ---
+        # start_hours_from_now: hours until the user's action deadline.
+        # If > 15 min away → tell the user when to start (deferred).
+        # If ≤ 15 min → act NOW!
+        start_hours = best_strategy.get("start_hours_from_now", 0.0) or 0.0
+        deferred_minutes = 15  # act if ≤ 15 min until deadline
         current_time: datetime = current_conditions.get("current_time", datetime.now())
 
-        if best_strategy["achieves_target"] and delay_budget > (deferred_minutes / 60.0):
-            start_by = current_time + timedelta(hours=delay_budget)
-            # strftime %-I is Linux-only; strip leading zero manually for cross-platform
+        if best_strategy["achieves_target"] and start_hours > (deferred_minutes / 60.0):
+            start_by = current_time + timedelta(hours=start_hours)
             hour_str = start_by.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
             timing = f"by {hour_str}"
             if fan_window_note:
@@ -393,11 +397,14 @@ class StrategyEngine:
             target_temp=target_temp,
             reasoning=reasoning,
             confidence=0.7 if best_strategy["achieves_target"] else 0.4,
+            start_hours_from_now=best_strategy.get("start_hours_from_now"),
+            strategy_hours_to_cool=best_strategy.get("hours_to_cool"),
             alternatives=[
                 {
                     "method": s["method"].value,
                     "predicted_temp": round(s["prediction"].predicted_bedtime_temp, 1),
                     "hours_to_cool": round(s["hours_to_cool"], 1) if s["hours_to_cool"] is not None else None,
+                    "start_hours_from_now": round(s["start_hours_from_now"], 2) if s["start_hours_from_now"] is not None else None,
                     "achieves_target": s["achieves_target"],
                     "chosen": s is best_strategy,
                 }
@@ -534,6 +541,62 @@ class StrategyEngine:
             )
 
         return ". ".join(parts) + "."
+
+    def _find_latest_viable_start(
+        self,
+        strategy: str,
+        current_conditions: dict[str, Any],
+        no_action_hourly: list[dict[str, Any]],
+        hours_to_target: float,
+        tolerance_hours: float,
+        check_outdoor_advantage: bool,
+    ) -> dict[str, Any] | None:
+        """Find the latest time (hours from now) at which starting this strategy
+        can still reach target by target_time + tolerance.
+
+        Scans forward one hour at a time using the no-action temperature trajectory
+        as the starting point for each trial.  For fan/window strategies, skips
+        hours where outdoor air is not cool enough vs predicted indoor temp.
+
+        Returns {"start_hours_from_now": float, "hours_to_cool": float} or None
+        if target is unreachable at any start time.
+        """
+        now: datetime = current_conditions.get("current_time", datetime.now())
+        forecast = current_conditions.get("forecast", [])
+        latest_viable: dict[str, Any] | None = None
+
+        for i, pred in enumerate(no_action_hourly):
+            hours_offset = float(i)
+            remaining = hours_to_target - hours_offset
+            if remaining <= 0:
+                break
+
+            indoor_at_offset = pred["predicted_temp"]
+            future_time = now + timedelta(hours=hours_offset)
+
+            if check_outdoor_advantage:
+                fcast = self.thermal_model._get_forecast_for_hour(forecast, future_time)
+                outdoor_at_offset = fcast.get(
+                    "temperature", current_conditions.get("outdoor_temp", 70.0)
+                )
+                if indoor_at_offset - outdoor_at_offset < self.min_temp_advantage:
+                    continue  # Outside not cool enough to bother at this hour
+
+            shifted = dict(current_conditions)
+            shifted["indoor_temp"] = indoor_at_offset
+            shifted["current_time"] = future_time
+
+            h = self.thermal_model.find_hours_to_cool_to_target(
+                shifted, strategy, max_hours=remaining + tolerance_hours
+            )
+            if h is not None and h <= remaining + tolerance_hours:
+                # Viable — keep scanning to find the LATEST possible start
+                latest_viable = {
+                    "start_hours_from_now": hours_offset,
+                    "hours_to_cool": h,
+                }
+
+        return latest_viable
 
     def _generate_reasoning(
         self,
@@ -709,15 +772,29 @@ class StrategyEngine:
                 if nat_h is None or not natural_strategy.get("achieves_target"):
                     parts.append("Natural ventilation alone is not enough — fan needed")
             if hours_to_cool is not None:
-                parts.append(f"Fan will reach target in {_cool_time_str(hours_to_cool)}")
+                start_offset = strategy.get("start_hours_from_now", 0.0) or 0.0
+                if start_offset > 0.25:
+                    fan_start_time = current_time + timedelta(hours=start_offset)
+                    h_str = fan_start_time.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+                    parts.append(
+                        f"Fan can start as late as {h_str} and still reach target "
+                        f"({_cool_time_str(hours_to_cool)} run time from that point)"
+                    )
+                else:
+                    parts.append(f"Fan will reach target in {_cool_time_str(hours_to_cool)}")
             if tolerance_minutes > 0 and achieves:
                 parts.append(
-                    f"This is within the {tolerance_minutes}-minute tolerance — "
-                    f"fan preferred over AC to save energy"
+                    f"Fan preferred over AC to save energy"
                 )
             if ac_strategy and ac_strategy.get("hours_to_cool") is not None:
-                ac_h = ac_strategy["hours_to_cool"]
-                parts.append(f"AC would be faster ({ac_h:.1f}h) but not needed given tolerance")
+                ac_start = ac_strategy.get("start_hours_from_now")
+                if ac_start is not None and ac_start > 0.25:
+                    ac_start_time = current_time + timedelta(hours=ac_start)
+                    h_str = ac_start_time.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+                    parts.append(f"AC also viable (start by {h_str}) but not needed")
+                else:
+                    ac_h = ac_strategy["hours_to_cool"]
+                    parts.append(f"AC would be faster ({ac_h:.1f}h) but not needed")
 
         elif method in (CoolingMethod.START_AC, CoolingMethod.CONTINUE_AC):
             # Explain why lower-energy options were rejected
@@ -726,27 +803,29 @@ class StrategyEngine:
             elif not fan_available:
                 parts.append("No fan available in this room — AC required for active cooling")
             else:
-                if fan_strategy:
-                    fan_h = fan_strategy.get("hours_to_cool")
-                    if fan_h is None:
-                        # After the step-hours fix, None means genuinely can't reach in 24h
-                        if forecast_temps and min(forecast_temps) >= target_temp:
-                            parts.append(
-                                f"Outdoor air ({min(forecast_temps):.0f}°F min forecast) "
-                                f"won't drop below target — fan/window cannot cool the room"
-                            )
-                        else:
-                            parts.append(
-                                f"Fan cannot cool the room to {target_temp:.0f}°F "
-                                f"within 24 hours given current conditions"
-                            )
-                    elif not fan_strategy.get("achieves_target"):
+                if fan_strategy and not fan_strategy.get("achieves_target"):
+                    # forward scan found no viable start window for fan
+                    if forecast_temps and min(forecast_temps) >= target_temp:
                         parts.append(
-                            f"Fan would take {_cool_time_str(fan_h)}, which exceeds the "
-                            f"{tolerance_minutes}-minute tolerance — AC required"
+                            f"Outdoor air ({min(forecast_temps):.0f}°F min forecast) "
+                            f"won't drop below target — fan/window cannot cool the room"
+                        )
+                    else:
+                        parts.append(
+                            f"Fan cannot reach {target_temp:.0f}°F within the available "
+                            f"time window — AC required"
                         )
             if hours_to_cool is not None:
-                parts.append(f"AC will reach target in {_cool_time_str(hours_to_cool)}")
+                start_offset = strategy.get("start_hours_from_now", 0.0) or 0.0
+                if start_offset > 0.25:
+                    ac_start_time = current_time + timedelta(hours=start_offset)
+                    h_str = ac_start_time.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+                    parts.append(
+                        f"AC can start as late as {h_str} and reach target "
+                        f"({_cool_time_str(hours_to_cool)} run time)"
+                    )
+                else:
+                    parts.append(f"AC will reach target in {_cool_time_str(hours_to_cool)}")
             elif not achieves:
                 if forecast_temps and min(forecast_temps) >= target_temp:
                     parts.append(

@@ -39,50 +39,72 @@ Write-Host "  SMART COOLING DIAGNOSTIC" -ForegroundColor Cyan
 Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
-# --- INPUT ENTITIES ---
-Write-Host "INPUT ENTITIES" -ForegroundColor Yellow
+# --- INPUT ENTITIES (read from configured_sensors attributes dynamically) ---
+Write-Host "INPUT ENTITIES (from integration config)" -ForegroundColor Yellow
 Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
-$inputs = @(
-    "sensor.ca_outside_temperature_coldest_sensor",
-    "sensor.ca_master_bed_air_quality_temperature",
-    "sensor.ca_master_bed_air_quality_humidity",
-    "sensor.ca_airnow_aqi",
-    "binary_sensor.ca_master_bedroom_windows_open",
-    "binary_sensor.ca_master_bed_window_fan_state",
-    "binary_sensor.ca_tstat_upstairs_ac_on",
-    "input_number.ca_upstairs_bedrooms_cooling_setpoint",
-    "input_number.master_bedroom_target_temp",
-    "input_datetime.master_bedroom_target_temp_time"
-)
-foreach ($eid in $inputs) {
-    $s = Get-HA "states/$eid"
-    $col = if ($null -eq $s -or $s.state -in "unavailable","unknown") { "Red" } else { "Green" }
-    $val = if ($null -eq $s) { "NOT FOUND" } else { $s.state }
-    Write-Host ("  {0,-55} {1}" -f $eid, $val) -ForegroundColor $col
+
+# Find the configured_sensors sensor across all instances
+$all = Get-HA "states"
+$cfgSensor = $all | Where-Object { $_.entity_id -eq "sensor.master_bedroom_configured_sensors" } | Select-Object -First 1
+if ($cfgSensor -and $cfgSensor.attributes) {
+    $slots = $cfgSensor.attributes.PSObject.Properties |
+             Where-Object { $_.Name -notin @("friendly_name","icon","unit_of_measurement","state_class","device_class") }
+    foreach ($slot in $slots) {
+        $info = $slot.Value
+        if ($null -eq $info) {
+            Write-Host ("  {0,-30} (not configured)" -f $slot.Name) -ForegroundColor DarkGray
+        } else {
+            $eid = $info.entity_id
+            $state = $info.state
+            $col = if ($state -in "unavailable","unknown","") { "Red" } elseif ($null -eq $state) { "DarkGray" } else { "Green" }
+            Write-Host ("  {0,-30} {1,-55} = {2}" -f $slot.Name, $eid, $state) -ForegroundColor $col
+        }
+    }
+} else {
+    Write-Host "  Could not find configured_sensors entity — listing fallback hardcoded IDs" -ForegroundColor DarkYellow
+    $inputs = @(
+        "sensor.ca_outside_temperature_coldest_sensor",
+        "sensor.ca_master_bed_air_quality_temperature",
+        "binary_sensor.ca_master_bedroom_windows_open",
+        "binary_sensor.ca_master_bed_window_fan_state",
+        "binary_sensor.ca_tstat_upstairs_ac_on",
+        "input_number.ca_upstairs_bedrooms_cooling_setpoint",
+        "input_number.master_bedroom_target_temp",
+        "input_datetime.master_bedroom_target_temp_time"
+    )
+    foreach ($eid in $inputs) {
+        $s = Get-HA "states/$eid"
+        $col = if ($null -eq $s -or $s.state -in "unavailable","unknown") { "Red" } else { "Green" }
+        $val = if ($null -eq $s) { "NOT FOUND" } else { $s.state }
+        Write-Host ("  {0,-55} {1}" -f $eid, $val) -ForegroundColor $col
+    }
 }
 
-# --- WEATHER FORECAST SAMPLE ---
-Write-Host "`nWEATHER FORECAST (next 8 hours)" -ForegroundColor Yellow
+# --- WEATHER FORECAST (from coordinator's bias-corrected forecast_sample) ---
+Write-Host "`nWEATHER FORECAST (bias-corrected, from coordinator)" -ForegroundColor Yellow
 Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
 $wx = Get-HA "states/weather.chezaggar"
-if ($wx) {
-    Write-Host ("  Condition: {0}" -f $wx.state) -ForegroundColor Green
-    $fc = $wx.attributes.forecast
-    if ($fc) {
-        $n = [Math]::Min(8, $fc.Count)
-        for ($i = 0; $i -lt $n; $i++) {
-            $f = $fc[$i]
-            $dt = try { ([datetime]$f.datetime).ToString("HH:mm") } catch { $f.datetime }
-            Write-Host ("  [{0}] temp={1,5}°F  wind={2,4}mph  humidity={3,3}%  cond={4}" -f `
-                $dt, (fmt $f.temperature), (fmt $f.wind_speed), (fmt $f.humidity), (fmt $f.condition))
-        }
-    } else { Write-Host "  No forecast data in attributes" -ForegroundColor Red }
-} else { Write-Host "  weather.chezaggar not found" -ForegroundColor Red }
+if ($wx) { Write-Host ("  Condition: {0}" -f $wx.state) -ForegroundColor Green }
+# The forecast is fetched via service call, not in state attributes.
+# Read forecast_sample from the predicted_temp sensor which has it cached.
+$predSensor = $all | Where-Object { $_.entity_id -like "*smart_cooling*predicted_temp_no_action*" -or $_.entity_id -like "*smart_cooling*predicted_temperature_at_target*" } | Select-Object -First 1
+if ($predSensor -and $predSensor.attributes.forecast_sample) {
+    $fc = $predSensor.attributes.forecast_sample
+    $n  = [Math]::Min(12, $fc.Count)
+    Write-Host ("  {0} entries from HA, showing next {1}h:" -f ($predSensor.attributes.forecast_entries ?? $fc.Count), $n) -ForegroundColor DarkGray
+    for ($i = 0; $i -lt $n; $i++) {
+        $f  = $fc[$i]
+        $dt = try { ([datetime]$f.datetime).ToString("HH:mm") } catch { $f.datetime }
+        Write-Host ("  [{0}] temp={1,6}°F  wind={2,5}mph  humidity={3,3}%" -f `
+            $dt, (fmt $f.temperature), (fmt $f.wind_speed), (fmt $f.humidity))
+    }
+} else {
+    Write-Host "  Forecast sample not yet available (check after first coordinator update)" -ForegroundColor DarkYellow
+}
 
 # --- SMART COOLING SENSORS ---
 Write-Host "`nSMART COOLING SENSORS" -ForegroundColor Yellow
 Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
-$all = Get-HA "states"
 $sc = $all | Where-Object { $_.entity_id -like "*smart_cooling*" } | Sort-Object entity_id
 
 if (-not $sc -or $sc.Count -eq 0) {
@@ -161,18 +183,7 @@ foreach ($e in $sc) {
             }
         }
 
-        # Forecast sample (from predicted temp sensor)
-        if ($ShowForecast) {
-            $fs = $attrs.forecast_sample
-            if ($fs -and $fs.Count -gt 0) {
-                Write-Host "    forecast_sample (bias-corrected):" -ForegroundColor DarkGray
-                foreach ($f in $fs) {
-                    $dt = try { ([datetime]$f.datetime).ToString("HH:mm") } catch { $f.datetime }
-                    Write-Host ("      [{0}] temp={1,5}°F  wind={2,4}  humidity={3}%" -f `
-                        $dt, (fmt $f.temperature), (fmt $f.wind_speed), (fmt $f.humidity)) -ForegroundColor DarkGray
-                }
-            }
-        }
+        # Forecast sample (no longer shown here — see WEATHER FORECAST section above)
     }
 }
 
