@@ -352,15 +352,24 @@ class StrategyEngine:
             fan_window_note = "open window and start fan"
 
         # --- Timing based on latest viable start from forward scan ---
-        # start_hours_from_now: hours until the user's action deadline.
-        # If > 15 min away → tell the user when to start (deferred).
-        # If ≤ 15 min → act NOW!
-        start_hours = best_strategy.get("start_hours_from_now", 0.0) or 0.0
+        # Anchor the displayed start time to: target_datetime - hours_to_cool.
+        # This is a FIXED wall-clock deadline — it does not change every minute
+        # as `now` advances.  (Contrast: now + start_hours_from_now would slide
+        # by 1 min each coordinator cycle, causing constant state-change spam.)
         deferred_minutes = 15  # act if ≤ 15 min until deadline
         current_time: datetime = current_conditions.get("current_time", datetime.now())
+        target_dt = current_time + timedelta(hours=hours_to_target)
+        hours_to_cool_val = best_strategy.get("hours_to_cool") or 0.0
+        start_hours = best_strategy.get("start_hours_from_now", 0.0) or 0.0
 
         if best_strategy["achieves_target"] and start_hours > (deferred_minutes / 60.0):
-            start_by = current_time + timedelta(hours=start_hours)
+            # Deadline = target - time_needed_to_cool; round to 5 min to suppress churn.
+            start_by = target_dt - timedelta(hours=hours_to_cool_val)
+            rounded_min = round(start_by.minute / 5) * 5
+            if rounded_min >= 60:
+                start_by = start_by.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            else:
+                start_by = start_by.replace(minute=rounded_min, second=0, microsecond=0)
             hour_str = start_by.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
             timing = f"by {hour_str}"
             if fan_window_note:

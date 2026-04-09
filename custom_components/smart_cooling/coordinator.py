@@ -651,9 +651,10 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             no_action = strategy.method.value == "no_action"
             if no_action or (hours_until_cool is not None and hours_until_cool <= 0.0):
                 action_needed_by = None
-            elif strat_start is not None:
-                # Derived directly from the forward scan: latest viable start time
-                action_needed_by = _round_to_5min(now + timedelta(hours=max(0.0, strat_start)))
+            elif strat_start is not None and strat_cool is not None:
+                # Anchor to target_datetime - cooling_duration (fixed wall clock time).
+                # Using now + strat_start would slide by 1 min every coordinator cycle.
+                action_needed_by = _round_to_5min(target_datetime - timedelta(hours=strat_cool))
             else:
                 # Strategy achieves_target is False — action needed immediately
                 action_needed_by = _round_to_5min(now)
