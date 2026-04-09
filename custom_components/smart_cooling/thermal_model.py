@@ -240,13 +240,10 @@ class ThermalModel:
                     outdoor_humidity=float(hour_humidity),
                 )
             elif cooling_strategy == "ac":
-                # AC only runs when the room is above its setpoint. If the room is
-                # already at or below the setpoint the thermostat is satisfied and
-                # no cooling is applied. This prevents the clamp below from
-                # incorrectly pushing a cool room UP to the setpoint temperature.
-                ac_setpoint = current_conditions.get("ac_setpoint")
-                if ac_setpoint is None or simulated_temp > float(ac_setpoint):
-                    cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
+                # When simulating the AC recommendation the user will lower the
+                # thermostat setpoint to reach the target, so the *current*
+                # setpoint does not constrain cooling here.
+                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
             elif cooling_strategy == "natural":
                 # Natural ventilation (open window, no fan) — driven by
                 # temperature differential and wind, but less effective than a fan
@@ -273,12 +270,13 @@ class ThermalModel:
             net_change = heat_gain - cooling
             simulated_temp += net_change
 
-            # Safety clamp: don't let AC simulation overshoot below the setpoint
-            # (only relevant for large step sizes; with the gate above this rarely fires).
+            # Background AC protection: the current setpoint is a ceiling for
+            # non-AC strategies. The thermostat prevents the room rising above it
+            # when we simulate fan/natural/no-action scenarios.
             ac_setpoint = current_conditions.get("ac_setpoint")
-            if cooling_strategy == "ac" and ac_setpoint is not None:
-                simulated_temp = max(simulated_temp, float(ac_setpoint))
-            
+            if cooling_strategy != "ac" and ac_setpoint is not None:
+                simulated_temp = min(simulated_temp, float(ac_setpoint))
+
             hourly_predictions.append({
                 "hour": hour,
                 "time": future_time.isoformat(),
@@ -367,9 +365,7 @@ class ThermalModel:
                     outdoor_humidity=float(hour_humidity),
                 )
             elif cooling_strategy == "ac":
-                ac_setpoint = current_conditions.get("ac_setpoint")
-                if ac_setpoint is None or simulated_temp > float(ac_setpoint):
-                    cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
+                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
             elif cooling_strategy == "natural":
                 temp_diff = simulated_temp - hour_outdoor_temp
                 if temp_diff > 0:
@@ -390,10 +386,10 @@ class ThermalModel:
             net_change = heat_gain - cooling
             simulated_temp += net_change * step_hours
 
-            # Safety clamp: don't overshoot below setpoint.
+            # Background AC protection: ceiling for non-AC strategies.
             ac_setpoint = current_conditions.get("ac_setpoint")
-            if cooling_strategy == "ac" and ac_setpoint is not None:
-                simulated_temp = max(simulated_temp, float(ac_setpoint))
+            if cooling_strategy != "ac" and ac_setpoint is not None:
+                simulated_temp = min(simulated_temp, float(ac_setpoint))
 
             if simulated_temp <= target_temp:
                 return round(elapsed_hours + step_hours, 2)
@@ -468,8 +464,7 @@ class ThermalModel:
                     outdoor_humidity=float(hour_humidity),
                 )
             elif cooling_strategy == "ac":
-                if ac_setpoint is None or simulated_temp > float(ac_setpoint):
-                    cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
+                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
             elif cooling_strategy == "natural":
                 temp_diff = simulated_temp - hour_outdoor_temp
                 if temp_diff > 0:
@@ -488,8 +483,9 @@ class ThermalModel:
             net_change = heat_gain - cooling
             simulated_temp += net_change
 
-            if cooling_strategy == "ac" and ac_setpoint is not None:
-                simulated_temp = max(simulated_temp, float(ac_setpoint))
+            # Background AC protection: ceiling for non-AC strategies.
+            if cooling_strategy != "ac" and ac_setpoint is not None:
+                simulated_temp = min(simulated_temp, float(ac_setpoint))
 
             if simulated_temp > peak_temp:
                 peak_temp = simulated_temp
