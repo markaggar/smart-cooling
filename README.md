@@ -13,9 +13,10 @@ A Home Assistant custom integration that predicts whether your room will reach a
 - **Close-window detection** — if a window is open but outdoor conditions have turned counterproductive (outside warmer than inside, AQI spike, or over-cooling risk), the recommendation immediately switches to *"Close window"* with a reason
 - **Adaptive learning** — segmented by what was running (passive, window, fan, AC); each mode independently tunes its own parameters from nightly outcomes
 - **Tolerance-aware scheduling** — gives lower-energy methods extra time before escalating to AC
-- **9 sensors per room** — recommendation, two predicted-temp sensors (no-action baseline and with-recommendation), deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning
+- **10 sensors per room** — recommendation, two predicted-temp sensors (no-action baseline and with-recommendation), deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning, and a configured-sensors diagnostic sensor
 - **AC setpoint awareness** — optional thermostat setpoint entity prevents the model from predicting AC cooling past the temperature the AC will actually stop at
 - **Close-window wind context** — when recommending to close a window, the reasoning now explains whether calm walls, light breeze, or active wind is driving the predicted cool-down
+- **Forecast bias correction** — actual outdoor sensor reading is used to anchor the near-term forecast. Any gap between the sensor and the forecast's current-hour temperature is applied to the first several forecast hours with exponential decay, fading to zero by ~6 hours out
 
 ---
 
@@ -84,12 +85,12 @@ All options except room name are editable after setup via **Settings → Devices
 
 ## Sensors
 
-Each room creates 9 sensors with IDs following the pattern `sensor.smart_cooling_{room_name}_{key}`:
+Each room creates 10 sensors with IDs following the pattern `sensor.smart_cooling_{room_name}_{key}`:
 
 | Sensor | What it shows |
 |---|---|
 | `recommendation` | Human-readable action, e.g. *"Open window now"* or *"Start AC — target may not be reached"* |
-| `predicted_target_temp` | **Predicted Temp (No Action)** — predicted °F at the target time if the current device state continues unchanged (AC stays on if running, window stays open if open, etc.). Attributes include `hourly_predictions`, `forecast_entries`, `forecast_sample`, and `physics_params`. |
+| `predicted_target_temp` | **Predicted Temp (No Action)** — predicted °F at the target time if the current device state continues unchanged (AC stays on if running, window stays open if open, etc.). Attributes include `hourly_predictions`, `forecast_entries`, `forecast_sample`, `physics_params`, and 24-hour peak predictions. |
 | `predicted_temp_with_action` | **Predicted Temp (With Recommendation)** — predicted °F at the target time if the recommended action is followed immediately. Useful for seeing the gap between doing something and doing nothing. |
 | `cooling_deficit` | Degrees above target the room is predicted to be at the deadline. Negative = room will be below target (over-cooling). Computed from the no-action prediction. |
 | `prediction_confidence` | 0–100% accuracy confidence based on past predictions. Below 10 validated predictions, shows 50%. See [Confidence](#prediction-confidence). |
@@ -97,6 +98,7 @@ Each room creates 9 sensors with IDs following the pattern `sensor.smart_cooling
 | `will_reach_target_at` | Datetime when the room is predicted to reach the target temperature. `Unknown` if already there. |
 | `action_needed_by` | Latest datetime to start the recommended action and still meet the deadline. `Unknown` if no action is needed. Attributes include `overdue` and `minutes_remaining`. |
 | `reasoning` | Plain-English explanation of why this strategy was chosen. Full text in `full_reasoning` attribute. |
+| `configured_sensors` | **Diagnostic** — state is the count of configured sensor/entity slots for this room (including global sensors). Attributes show the live HA state of each slot. See [Configured Sensors](#configured-sensors-sensor). |
 
 ### Predicted Temperature Attributes
 
@@ -120,7 +122,66 @@ physics_params:              # current model parameters for this room
   base_heat_gain_rate: 0.5
   thermal_transfer_coefficient: 0.1
   # ...
+peak_temp_closed: 84.2      # 24h peak predicted temp with window closed (walls only)
+peak_at_closed: '2026-04-08T15:00:00'   # when that peak occurs
+peak_temp_open: 79.6        # 24h peak with window open (natural ventilation)
+peak_at_open: '2026-04-08T14:30:00'     # when that peak occurs
 ```
+
+`peak_temp_closed` and `peak_temp_open` are useful for dashboards that want to show "today's expected high" for the room under each scenario.
+
+### Configured Sensors Sensor
+
+`sensor.smart_cooling_{room_name}_configured_sensors` reports the count of entity slots that have been wired in for this room (including the three shared global sensors). Its **attributes contain the live HA state** of each slot — not the entity ID, but the current reading:
+
+```yaml
+# State: 9  (9 out of 11 possible slots are configured)
+weather_entity: sunny          # current weather entity state
+outdoor_temp_sensor: "81.3"   # current outdoor temperature
+aqi_sensor: "42"               # current AQI reading
+indoor_temp_sensor: "74.6"    # room temperature
+indoor_humidity_sensor: null   # not configured → null
+window_sensor: "off"           # window closed
+fan_sensor: "off"              # fan off
+ac_sensor: "on"                # AC running
+ac_setpoint_entity: "72.0"    # AC thermostat setpoint
+target_temp_entity: "70.0"    # desired target temperature
+target_time_entity: "22:30:00" # deadline
+```
+
+**Accessing attributes in HA templates:**
+
+```yaml
+# Current outdoor temperature (from the actual sensor state)
+{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'outdoor_temp_sensor') }}
+
+# Is the window open?
+{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'window_sensor') == 'on' }}
+
+# AC setpoint
+{{ state_attr('sensor.smart_cooling_bedroom_configured_sensors', 'ac_setpoint_entity') | float }}
+```
+
+Slots that are not configured return `null` in templates (`None` in Python). Slots that are configured but whose entity is unreachable return `"unavailable"`.
+
+### Forecast Bias Correction
+
+Every update cycle, after fetching the hourly weather forecast, the integration compares the forecast's current-hour temperature against the actual reading from your outdoor temperature sensor. If the gap is 0.5°F or more, it applies a correction to the near-term forecast temperatures:
+
+$$T_{\text{corrected},i} = T_{\text{forecast},i} + (T_{\text{actual}} - T_{\text{forecast},0}) \times e^{-\frac{\ln 2}{t_{1/2}} \cdot i}$$
+
+where $i$ is the hour index, and the half-life $t_{1/2}$ is **2 hours**. This means:
+
+| Forecast hour | Correction applied |
+|---|---|
+| Hour 0 (now) | 100% of the offset |
+| Hour 2 | 50% |
+| Hour 4 | 25% |
+| Hour 6+ | < 13% (effectively zero) |
+
+This corrects for microclimate differences — your backyard sensor may consistently read 3–4°F warmer or cooler than the area forecast — and grounds the simulation in what the sensor is actually measuring right now. The correction is skipped if the outdoor sensor is unavailable.
+
+The corrected forecast is what flows into `predict_temperature()` and is reflected in `forecast_sample` on the `predicted_target_temp` sensor.
 
 ---
 
@@ -427,7 +488,7 @@ coordinator.py          — DataUpdateCoordinator; orchestrates each update cycl
 ├── learning_module.py  — Prediction recording, scoring, and confidence calculation
 ├── calibration.py      — OLS regression to estimate params from historical data
 │
-sensor.py               — 8 HA sensor entities per room
+sensor.py               — 10 HA sensor entities per room
 config_flow.py          — 4-step setup wizard + options flow
 __init__.py             — Integration setup, service registration
 const.py                — Default physics params, domain constants
