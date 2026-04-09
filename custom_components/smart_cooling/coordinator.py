@@ -546,8 +546,13 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 action_prediction_strategy: str | None = "fan"
             elif "ac" in cooling_method:
                 action_prediction_strategy = "ac"
-            elif "close" in cooling_method or cooling_method == "no_action":
-                # Closing window / doing nothing — no active cooling
+            elif cooling_method == "no_action":
+                # No action — continue whatever is already running so the
+                # "With Recommendation" sensor reflects current trajectory,
+                # not a hypothetical closed-window/passive scenario.
+                action_prediction_strategy = existing_strategy
+            elif "close" in cooling_method:
+                # Explicit close-window recommendation — model passive (no cooling)
                 action_prediction_strategy = None
             else:
                 # open_window, keep_window_open
