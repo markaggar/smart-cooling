@@ -10,7 +10,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -428,6 +428,7 @@ class SmartCoolingConfiguredSensorsSensor(SmartCoolingBaseSensor):
 
     _attr_icon = "mdi:format-list-checks"
     _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self, coordinator: SmartCoolingCoordinator, entry: ConfigEntry
