@@ -85,20 +85,22 @@ All options except room name are editable after setup via **Settings → Devices
 
 ## Sensors
 
-Each room creates 10 sensors with IDs following the pattern `sensor.smart_cooling_{room_name}_{key}`:
+Each room creates 10 sensors with IDs following the pattern `sensor.smart_cooling_{room_name}_{key}`.
 
-| Sensor | What it shows |
-|---|---|
-| `recommendation` | Human-readable action, e.g. *"Open window now"* or *"Start AC — target may not be reached"* |
-| `predicted_target_temp` | **Predicted Temp (No Action)** — predicted °F at the target time if the current device state continues unchanged (AC stays on if running, window stays open if open, etc.). Attributes include `hourly_predictions`, `forecast_entries`, `forecast_sample`, `physics_params`, and 24-hour peak predictions. |
-| `predicted_temp_with_action` | **Predicted Temp (With Recommendation)** — predicted °F at the target time if the recommended action is followed immediately. Useful for seeing the gap between doing something and doing nothing. |
-| `cooling_deficit` | Degrees above target the room is predicted to be at the deadline. Negative = room will be below target (over-cooling). Computed from the no-action prediction. |
-| `prediction_confidence` | 0–100% accuracy confidence based on past predictions. Below 10 validated predictions, shows 50%. See [Confidence](#prediction-confidence). |
-| `time_to_target` | Hours remaining until the target time |
-| `will_reach_target_at` | Datetime when the room is predicted to reach the target temperature. `Unknown` if already there. |
-| `action_needed_by` | Latest datetime to start the recommended action and still meet the deadline. `Unknown` if no action is needed. Attributes include `overdue` and `minutes_remaining`. |
-| `reasoning` | Plain-English explanation of why this strategy was chosen. Full text in `full_reasoning` attribute. |
-| `configured_sensors` | **Diagnostic** — state is the count of configured sensor/entity slots for this room (including global sensors). Attributes show the live HA state of each slot. See [Configured Sensors](#configured-sensors-sensor). |
+Two sensors appear in the main section of the device page; the rest are grouped under **Diagnostics**:
+
+| Sensor | Category | What it shows |
+|---|---|---|
+| `recommendation` | Primary | Human-readable action, e.g. *"Open window now"* or *"Start AC — target may not be reached"* |
+| `action_needed_by` | Primary | Latest datetime to start the recommended action and still meet the deadline. `Unknown` if no action is needed. Attributes include `overdue` and `minutes_remaining`. |
+| `predicted_target_temp` | Diagnostic | **Predicted Temp (No Action)** — predicted °F at the target time if the current device state continues unchanged (AC stays on if running, window stays open if open, etc.). Attributes include `hourly_predictions`, `forecast_entries`, `forecast_sample`, `physics_params`, and 24-hour peak predictions. |
+| `predicted_temp_with_action` | Diagnostic | **Predicted Temp (With Recommendation)** — predicted °F at the target time if the recommended action is followed immediately. Useful for seeing the gap between doing something and doing nothing. |
+| `cooling_deficit` | Diagnostic | Degrees above target the room is predicted to be at the deadline. Negative = room will be below target (over-cooling). Computed from the no-action prediction. |
+| `time_to_target` | Diagnostic | Hours remaining until the target time |
+| `will_reach_target_at` | Diagnostic | Datetime when the room is predicted to reach the target temperature. `Unknown` if already there. |
+| `reasoning` | Diagnostic | Plain-English explanation of why this strategy was chosen. Full text in `full_reasoning` attribute. |
+| `prediction_confidence` | Diagnostic | 0–100% accuracy confidence based on past predictions. Below 10 validated predictions, shows 50%. See [Confidence](#prediction-confidence). |
+| `configured_sensors` | Diagnostic | Count of configured sensor/entity slots for this room (including global sensors). Attributes show the live HA state of each slot. See [Configured Sensors](#configured-sensors-sensor). |
 
 ### Predicted Temperature Attributes
 
