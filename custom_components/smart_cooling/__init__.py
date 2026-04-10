@@ -118,6 +118,20 @@ async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate config entry to a newer schema version.
+
+    Currently at VERSION = 1 — no migration needed yet.
+    Extend this function when bumping SmartCoolingConfigFlow.VERSION.
+    """
+    _LOGGER.debug(
+        "Migrating smart_cooling entry %s from version %s",
+        entry.entry_id,
+        entry.version,
+    )
+    return True
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):

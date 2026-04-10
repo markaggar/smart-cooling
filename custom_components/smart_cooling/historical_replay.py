@@ -288,12 +288,12 @@ class HistoricalReplayEngine:
                 prediction=prediction,
             )
             
-            error = actual_point.indoor_temp - prediction.predicted_bedtime_temp
+            error = actual_point.indoor_temp - prediction.predicted_target_temp
             
             results.append(ReplayResult(
                 timestamp=point.timestamp,
                 actual_temp=actual_point.indoor_temp,
-                predicted_temp=prediction.predicted_bedtime_temp,
+                predicted_temp=prediction.predicted_target_temp,
                 error=error,
                 conditions=conditions,
                 strategy_recommended=strategy.method.value,

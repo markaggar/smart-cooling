@@ -180,7 +180,7 @@ class LearningModule:
         
         record = PredictionRecord(
             timestamp=timestamp.isoformat(),
-            predicted_temp=prediction.predicted_bedtime_temp,
+            predicted_temp=prediction.predicted_target_temp,
             actual_temp=None,  # Will be filled in later
             conditions=serializable_conditions,
             params_used=params_used,
@@ -229,6 +229,14 @@ class LearningModule:
                 if r.actual_temp is None
             ]
             await self.hass.async_add_executor_job(self._save_state)
+        elif self._pending_predictions:
+            _LOGGER.debug(
+                "record_actual: no pending prediction matched timestamp %s "
+                "(actual=%.1f°F, %d pending)",
+                timestamp.isoformat(),
+                actual_temp,
+                len(self._pending_predictions),
+            )
 
     async def try_complete_predictions(
         self, current_time: datetime, current_indoor_temp: float
@@ -270,9 +278,9 @@ class LearningModule:
         if len(records_with_actuals) < 10:
             return None
 
-        def _mean(recs: list) -> float:
-            errs = [r.prediction_error() for r in recs]
-            return sum(errs) / len(errs)  # type: ignore[arg-type]
+        def _mean(recs: list[PredictionRecord]) -> float:
+            errs: list[float] = [e for r in recs if (e := r.prediction_error()) is not None]
+            return sum(errs) / len(errs)
 
         updated_params = dict(self._learned_params)
         changed = False
