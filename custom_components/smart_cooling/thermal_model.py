@@ -53,11 +53,17 @@ class TemperaturePrediction:
     
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for HA state attributes."""
+        predicted = round(self.predicted_target_temp, 1)
+        uncooled = round(self.uncooled_target_temp, 1)
         return {
-            "predicted_target_temp": round(self.predicted_target_temp, 1),
+            "predicted_target_temp": predicted,
             "cooling_deficit": round(self.cooling_deficit, 1),
-            "uncooled_target_temp": round(self.uncooled_target_temp, 1),
+            "uncooled_target_temp": uncooled,
             "hourly_predictions": self.hourly_predictions,
+            # Legacy aliases — kept for backward compatibility with existing
+            # automations and dashboards; will be removed in a future version.
+            "predicted_bedtime_temp": predicted,
+            "uncooled_bedtime_temp": uncooled,
         }
 
 

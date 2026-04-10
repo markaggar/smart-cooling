@@ -219,6 +219,7 @@ class LearningModule:
                     "[predicted at %s for target %s]",
                     actual_temp,
                     record.predicted_temp,
+                    actual_temp - record.predicted_temp,
                     record.timestamp,
                     record.target_datetime,
                 )

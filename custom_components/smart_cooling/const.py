@@ -6,7 +6,10 @@ from typing import Final
 DOMAIN: Final = "smart_cooling"
 MANUFACTURER: Final = "markaggar"
 
-_manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
+try:
+    _manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
+except (FileNotFoundError, OSError, json.JSONDecodeError):
+    _manifest = {}
 MODEL: Final[str] = _manifest.get("name", "Smart Cooling")
 SW_VERSION: Final[str] = _manifest.get("version", "0.0.0")
 

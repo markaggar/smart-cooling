@@ -189,6 +189,9 @@ class TestThermalModel:
         assert "cooling_deficit" in result
         assert "hourly_predictions" in result
         assert isinstance(result["predicted_target_temp"], float)
+        # Legacy alias keys must still be present for backward compatibility
+        assert result["predicted_bedtime_temp"] == result["predicted_target_temp"]
+        assert result["uncooled_bedtime_temp"] == result["uncooled_target_temp"]
 
     # ------------------------------------------------------------------
     # Solar model: extended window and thermal lag
