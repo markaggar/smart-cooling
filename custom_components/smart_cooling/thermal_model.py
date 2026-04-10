@@ -232,8 +232,13 @@ class ThermalModel:
         hourly_predictions = []
         simulated_temp = indoor_temp
 
-        # Compute once: peak afternoon solar load for thermal lag
-        peak_afternoon_solar = self._get_peak_afternoon_solar(forecast)
+        # Compute once: peak afternoon solar load for thermal lag.
+        # Take the max of (a) what the forecast says and (b) the day's running
+        # maximum tracked by the coordinator.  The forecast loses afternoon
+        # entries once those hours pass, so (b) is critical in the evening.
+        _forecast_solar = self._get_peak_afternoon_solar(forecast)
+        _tracked_solar = current_conditions.get("peak_afternoon_solar", 0.0)
+        peak_afternoon_solar = max(_forecast_solar, _tracked_solar)
 
         hours_to_simulate = int(hours_ahead) + 1
         
@@ -367,8 +372,11 @@ class ThermalModel:
         steps = int(max_hours / step_hours)
         simulated_temp = indoor_temp
 
-        # Compute once: peak afternoon solar load for thermal lag
-        peak_afternoon_solar = self._get_peak_afternoon_solar(forecast)
+        # Compute once: peak afternoon solar load for thermal lag.
+        # Take max of forecast-based and coordinator-tracked peaks.
+        _forecast_solar = self._get_peak_afternoon_solar(forecast)
+        _tracked_solar = current_conditions.get("peak_afternoon_solar", 0.0)
+        peak_afternoon_solar = max(_forecast_solar, _tracked_solar)
 
         for i in range(steps):
             elapsed_hours = i * step_hours
@@ -470,8 +478,11 @@ class ThermalModel:
         peak_temp = start_temp
         peak_at = start_time.isoformat()
 
-        # Compute once: peak afternoon solar load for thermal lag
-        peak_afternoon_solar = self._get_peak_afternoon_solar(forecast)
+        # Compute once: peak afternoon solar load for thermal lag.
+        # Take max of forecast-based and coordinator-tracked peaks.
+        _forecast_solar = self._get_peak_afternoon_solar(forecast)
+        _tracked_solar = current_conditions.get("peak_afternoon_solar", 0.0)
+        peak_afternoon_solar = max(_forecast_solar, _tracked_solar)
 
         hours_to_simulate = int(window_hours) + 1
 

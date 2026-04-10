@@ -344,3 +344,65 @@ class TestThermalModel:
              "cloud_coverage": 30.0, "temperature": 60.0},
         ]
         assert model._get_peak_afternoon_solar(forecast) == 0.0
+
+    def test_tracked_solar_overrides_empty_evening_forecast(self, model: ThermalModel):
+        """When forecast has no afternoon entries (evening run), the coordinator-
+        tracked peak_afternoon_solar in current_conditions must still drive the
+        thermal-lag term.  This is the correctness scenario: without the tracked
+        value the model forgets stored wall-heat after ~6 PM."""
+        night_forecast = [
+            {"datetime": datetime(2024, 7, 15, 21, 0), "uv_index": 0.0,
+             "cloud_coverage": 30.0, "temperature": 68.0},
+            {"datetime": datetime(2024, 7, 15, 22, 0), "uv_index": 0.0,
+             "cloud_coverage": 30.0, "temperature": 66.0},
+        ]
+        base_conditions = {
+            "indoor_temp": 78.0,
+            "outdoor_temp": 65.0,
+            "target_temp": 70.0,
+            "outdoor_humidity": 50.0,
+            "current_time": datetime(2024, 7, 15, 21, 0),
+            "forecast": night_forecast,
+        }
+        # Without tracked value: thermal lag is zero (no afternoon data in forecast)
+        result_no_lag = model.predict_temperature(
+            dict(base_conditions), hours_ahead=4.0, cooling_strategy=None
+        )
+        # With tracked value set by coordinator (0.8 = sunny afternoon)
+        with_tracked = {**base_conditions, "peak_afternoon_solar": 0.8}
+        result_with_lag = model.predict_temperature(
+            with_tracked, hours_ahead=4.0, cooling_strategy=None
+        )
+        # Thermal lag adds stored heat → predicted temp with lag must be warmer
+        assert result_with_lag.predicted_bedtime_temp > result_no_lag.predicted_bedtime_temp
+
+    def test_forecast_solar_wins_when_higher_than_tracked(self, model: ThermalModel):
+        """During the daytime the forecast may predict a higher afternoon peak than
+        what has been observed so far.  The model should use the forecast value
+        (i.e. take the max, not just the tracked value)."""
+        daytime_forecast = [
+            {"datetime": datetime(2024, 7, 15, 13, 0), "uv_index": 9.0,
+             "cloud_coverage": 5.0, "temperature": 88.0},
+        ]
+        base_conditions = {
+            "indoor_temp": 78.0,
+            "outdoor_temp": 82.0,
+            "target_temp": 70.0,
+            "outdoor_humidity": 40.0,
+            "current_time": datetime(2024, 7, 15, 10, 0),
+            "forecast": daytime_forecast,
+        }
+        # Tracked value is low (early morning — little observed yet); forecast is high
+        result_low_tracked = model.predict_temperature(
+            {**base_conditions, "peak_afternoon_solar": 0.1},
+            hours_ahead=6.0, cooling_strategy=None,
+        )
+        # No tracked at all — falls back to forecast scan only (~0.81)
+        result_forecast_only = model.predict_temperature(
+            dict(base_conditions), hours_ahead=6.0, cooling_strategy=None,
+        )
+        # Both must produce nearly the same result: max(0.81, 0.1)==0.81 ≈ max(0.81, 0)==0.81
+        assert abs(
+            result_low_tracked.predicted_bedtime_temp
+            - result_forecast_only.predicted_bedtime_temp
+        ) < 0.5

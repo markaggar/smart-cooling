@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -78,6 +78,15 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         learned_params = self.learning_module.get_learned_params()
         if learned_params:
             self.thermal_model.update_params(learned_params)
+
+        # Track the day's peak afternoon solar load (UV × cloud factor) as a
+        # running maximum updated each coordinator cycle.  HA's hourly forecast
+        # only covers *future* hours, so after ~6 PM the afternoon entries drop
+        # off and _get_peak_afternoon_solar(forecast) would return 0 — making
+        # the model forget all the heat stored in walls and the attic that day.
+        # We cache the observed value here so it survives into the evening.
+        self._peak_afternoon_solar_today: float = 0.0
+        self._peak_solar_date: date | None = None
 
     def _build_config(self) -> dict[str, Any]:
         """Build configuration merging entry data, options, and global config."""
@@ -336,6 +345,27 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # forecast temperatures with an exponential decay over ~6 hours.
             forecast = self._apply_forecast_bias_correction(forecast)
 
+            # Update today's peak observed afternoon solar load.
+            # We record the maximum cloud-adjusted UV fraction seen while the
+            # coordinator is running during the afternoon (hours 9–17).  This
+            # persists in memory so that evening predictions can still supply a
+            # non-zero thermal-lag term even after those hours leave the forecast.
+            _update_dt = dt_util.now()
+            _today = _update_dt.date()
+            if self._peak_solar_date != _today:
+                self._peak_afternoon_solar_today = 0.0
+                self._peak_solar_date = _today
+            if 9 <= _update_dt.hour <= 17 and forecast:
+                try:
+                    _uv_now = float(forecast[0].get("uv_index", 0.0))
+                    _cloud_now = float(forecast[0].get("cloud_coverage", 50.0))
+                    _solar_now = (_uv_now / 10.0) * ((100.0 - _cloud_now) / 100.0)
+                    self._peak_afternoon_solar_today = max(
+                        self._peak_afternoon_solar_today, _solar_now
+                    )
+                except (TypeError, ValueError):
+                    pass
+
             current_wind_speed = self._get_current_wind_speed(forecast)
             current_outdoor_humidity = self._get_current_outdoor_humidity(forecast)
             current_wind_bearing = self._get_current_wind_bearing(forecast)
@@ -387,6 +417,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ac_available": bool(self.config.get(CONF_AC_AVAILABLE, True)),
                 "ac_setpoint": self._get_ac_setpoint(),
                 "current_time": dt_util.now(),
+                "peak_afternoon_solar": self._peak_afternoon_solar_today,
                 "forecast": forecast,
             }
             
