@@ -57,9 +57,8 @@ class LearningModule:
         self._learned_params: dict[str, float] = {}
         self._pending_predictions: list[PredictionRecord] = []
         self._historical_records: list[PredictionRecord] = []
-        
-        # Load persisted state
-        self._load_state()
+        # Persisted state is loaded asynchronously via async_load() to avoid
+        # blocking the event loop during integration setup.
 
     def _load_state(self) -> None:
         """Load persisted parameters and history."""
@@ -85,6 +84,10 @@ class LearningModule:
                 _LOGGER.info("Loaded %d historical records", len(self._historical_records))
             except (json.JSONDecodeError, OSError) as err:
                 _LOGGER.warning("Failed to load history: %s", err)
+
+    async def async_load(self) -> None:
+        """Load persisted parameters and history without blocking the event loop."""
+        await self.hass.async_add_executor_job(self._load_state)
 
     def _save_state(self) -> None:
         """Persist parameters and history."""
@@ -225,7 +228,7 @@ class LearningModule:
                 r for r in self._pending_predictions
                 if r.actual_temp is None
             ]
-            self._save_state()
+            await self.hass.async_add_executor_job(self._save_state)
 
     async def try_complete_predictions(
         self, current_time: datetime, current_indoor_temp: float
@@ -372,7 +375,7 @@ class LearningModule:
             return None
 
         self._learned_params = updated_params
-        self._save_state()
+        await self.hass.async_add_executor_job(self._save_state)
         return updated_params
 
     # --- Historical Data Import for Testing ---
@@ -408,7 +411,7 @@ class LearningModule:
                 continue
         
         if imported > 0:
-            self._save_state()
+            await self.hass.async_add_executor_job(self._save_state)
             _LOGGER.info("Imported %d historical records", imported)
         
         return imported
@@ -416,12 +419,12 @@ class LearningModule:
     async def clear_learned_params(self) -> None:
         """Reset learned parameters to defaults."""
         self._learned_params = {}
-        self._save_state()
+        await self.hass.async_add_executor_job(self._save_state)
         _LOGGER.info("Cleared learned parameters")
 
     async def clear_history(self) -> None:
         """Clear all historical records."""
         self._historical_records = []
         self._pending_predictions = []
-        self._save_state()
+        await self.hass.async_add_executor_job(self._save_state)
         _LOGGER.info("Cleared historical records")

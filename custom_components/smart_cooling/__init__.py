@@ -100,6 +100,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Smart Cooling from a config entry."""
     coordinator = SmartCoolingCoordinator(hass, entry)
+    await coordinator.async_initialize()
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator

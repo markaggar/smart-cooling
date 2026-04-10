@@ -74,11 +74,6 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.strategy_engine = StrategyEngine(self.thermal_model)
         self.learning_module = LearningModule(hass, entry.entry_id)
         
-        # Apply any learned parameters for this room
-        learned_params = self.learning_module.get_learned_params()
-        if learned_params:
-            self.thermal_model.update_params(learned_params)
-
         # Track the day's peak afternoon solar load (UV × cloud factor) as a
         # running maximum updated each coordinator cycle.  HA's hourly forecast
         # only covers *future* hours, so after ~6 PM the afternoon entries drop
@@ -87,6 +82,17 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # We cache the observed value here so it survives into the evening.
         self._peak_afternoon_solar_today: float = 0.0
         self._peak_solar_date: date | None = None
+
+    async def async_initialize(self) -> None:
+        """Load persisted learning state and apply learned parameters.
+
+        Must be awaited before async_config_entry_first_refresh() so that
+        learned physics parameters are active for the very first prediction.
+        """
+        await self.learning_module.async_load()
+        learned_params = self.learning_module.get_learned_params()
+        if learned_params:
+            self.thermal_model.update_params(learned_params)
 
     def _build_config(self) -> dict[str, Any]:
         """Build configuration merging entry data, options, and global config."""
