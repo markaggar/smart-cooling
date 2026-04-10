@@ -13,6 +13,7 @@ A Home Assistant custom integration that predicts whether your room will reach a
 - **Close-window detection** — if a window is open but outdoor conditions have turned counterproductive (outside warmer than inside, AQI spike, or over-cooling risk), the recommendation immediately switches to *"Close window"* with a reason
 - **Adaptive learning** — segmented by what was running (passive, window, fan, AC); each mode independently tunes its own parameters from nightly outcomes
 - **Tolerance-aware scheduling** — gives lower-energy methods extra time before escalating to AC
+- **Overnight comfort window** — optionally configure a wake time so the model predicts whether the room will stay within a comfort tolerance *through the entire night*, not just at bedtime. It calculates the required pre-cool target temperature and recommends the appropriate strategy to maintain it until morning
 - **10 sensors per room** — recommendation, two predicted-temp sensors (no-action baseline and with-recommendation), deficit, confidence, time-to-target, will-reach-target-at, action-needed-by, reasoning, and a configured-sensors diagnostic sensor
 - **AC setpoint awareness** — optional thermostat setpoint entity prevents the model from predicting AC cooling past the temperature the AC will actually stop at
 - **Close-window wind context** — when recommending to close a window, the reasoning now explains whether calm walls, light breeze, or active wind is driving the predicted cool-down
@@ -78,6 +79,9 @@ These tell the integration what is currently running so recommendations say "kee
 | Target time entity | 22:30 | — | `input_datetime` helper for the deadline (e.g., bedtime) |
 | Tolerance minutes | 30 | 0–120 min | Extra grace window for lower-energy methods; see [Tolerance](#tolerance) |
 | Enable learning | On | — | Whether the model adapts from actual outcomes |
+| Comfort window end entity | — | — | `input_datetime` helper for when comfort must end (e.g., wake time). When set, activates the overnight comfort window; see [Comfort Window](#comfort-window) |
+| Comfort tolerance | 2.0 | °F | How far above target is still acceptable during the overnight window |
+| Prefer AC during comfort window | On | — | When on, biases toward AC to maintain overnight comfort. Turn off for rooms that prefer quiet at night. |
 
 All options except room name are editable after setup via **Settings → Devices & Services → Smart Cooling → Configure**.
 
@@ -244,7 +248,19 @@ Example entry (from the weather entity's hourly forecast):
   pressure: 30.36
 ```
 
-Only `datetime`, `temperature`, `wind_speed`, `wind_bearing`, and `humidity` are consumed. All other fields are ignored.
+The following fields are consumed. All others are ignored:
+
+| Attribute | Used for |
+|---|---|
+| `datetime` | Matching the forecast entry to the simulated hour |
+| `temperature` | Outdoor temperature in the thermal simulation |
+| `wind_speed` | Fan and natural ventilation wind factor |
+| `wind_bearing` | Wind alignment factor (degrees, 0 = N, 90 = E, 180 = S, 270 = W) |
+| `humidity` | Humidity penalty for fan/window effectiveness |
+| `cloud_coverage` | Reduces solar gain (0% cloud = full solar; 100% cloud = no solar) |
+| `uv_index` | Scales the solar gain term; also used to estimate the day's peak solar load for thermal lag |
+
+`cloud_coverage` and `uv_index` are used together: `solar_intensity = (uv_index / 10) × (1 − cloud_coverage / 100)`. Both are provided by Met.no, Open-Meteo, and most modern HA weather integrations.
 
 ---
 
@@ -254,11 +270,19 @@ Only `datetime`, `temperature`, `wind_speed`, `wind_bearing`, and `humidity` are
 
 Every update cycle, the model simulates the room temperature hour-by-hour from now until the target time. For each hour it:
 
-1. Looks up the outdoor temperature, wind speed, wind bearing, and humidity from the **hourly weather forecast** (matched within 90 minutes)
+1. Looks up the outdoor temperature, wind speed, wind bearing, humidity, UV index, and cloud coverage from the **hourly weather forecast** (matched within 90 minutes)
 2. Computes heat exchange through walls: `thermal_transfer_coefficient × (outdoor − indoor)`
 3. Adds `base_heat_gain_rate` for internal heat sources
-4. Adds solar gain if it is peak hours (noon–6 PM)
-5. Subtracts cooling from the active strategy:
+4. Adds solar gain for daytime hours using a linear ramp:
+   - Ramp **up** from 8 AM (0%) to 1 PM (100%)
+   - Ramp **down** from 1 PM (100%) to 7 PM (0%)
+   - Scaled by `solar_gain_factor × uv_factor × cloud_factor` where `uv_factor = uv_index / 10` and `cloud_factor = (100 − cloud_coverage) / 100`
+5. Adds thermal lag heat gain — walls and the attic absorb solar energy during the afternoon and re-radiate it in the evening. The model captures this with an exponential decay from peak (1 PM):
+
+   $$Q_{\text{lag}} = \text{afternoon\_solar\_load} \times \text{thermal\_lag\_factor} \times Q_{\text{base}} \times e^{-t_{\text{lag}}/4}$$
+
+   where $t_{\text{lag}}$ is hours since 2 PM (the thermal peak for dense materials) and the time constant is 4 hours. `afternoon_solar_load` is the day's peak cloud-adjusted UV fraction — tracked by the coordinator as a running maximum in memory from 9 AM to 5 PM, so the lag term remains active in evening predictions even after those hours have dropped off the forecast.
+6. Subtracts cooling from the active strategy:
    - **AC**: fixed rate based on outdoor temp (unaffected by humidity)
    - **Fan**: scales with temp differential and per-hour wind speed; reduced by high outdoor humidity
    - **Natural ventilation**: scales with temp differential and wind; same humidity reduction as fan
@@ -403,8 +427,10 @@ These control the thermal model and are stored per-room in `.storage/smart_cooli
 | `ac_cooling_rate_mild` | 4.5 | °F/hr | Adjust if AC reaches target faster/slower on mild days (outdoor < 82°F) |
 | `ac_cooling_rate_hot` | 2.5 | °F/hr | Adjust for hot days (outdoor ≥ 82°F) |
 | `natural_cooling_effectiveness` | 0.15 | coefficient | The passive airflow bonus from opening windows, on top of wall conduction. Near-zero at calm wind (< 1 mph); meaningful at 5+ mph. Tunable by the learning system from window-open nights. |
-| `fan_cooling_effectiveness` | 0.15 | coefficient | Raise if fan is more effective than predicted |
+| `fan_cooling_effectiveness` | 0.30 | coefficient | Fan ventilation coefficient. At 10°F indoor-outdoor differential this delivers ~2–3°F/hr of additional cooling. Tunable by the learning system from fan-on nights. |
 | `fan_equivalent_wind_speed` | 8.0 | mph | Effective wind speed assumed for fan on calm nights |
+| `fan_boost_factor` | 1.4 | multiplier | Extra boost applied when both a fan is running and meaningful outdoor wind is present (fan + wind > fan alone) |
+| `thermal_lag_factor` | 0.5 | multiplier | Controls how much afternoon solar heat stored in walls and the attic re-radiates in the evening. 0 = no lag effect; 1 = strong lag. Tunable by the learning system. |
 
 > **Note:** Default values only apply to new rooms. If a room was set up before a default was changed, update parameters via `smart_cooling.set_params` or `smart_cooling.calibrate`.
 
@@ -428,7 +454,7 @@ data:
   ac_cooling_rate_mild: 4.5
   ac_cooling_rate_hot: 2.5
   natural_cooling_effectiveness: 0.35
-  fan_cooling_effectiveness: 0.15
+  fan_cooling_effectiveness: 0.30
 ```
 
 Find `entry_id` in the URL when you click the integration in **Settings → Devices & Services → Smart Cooling**.
@@ -467,6 +493,9 @@ These flags are independent — you can have a room with windows and AC but no f
 ### AC takes too long or too short
 Adjust `ac_cooling_rate_mild` and `ac_cooling_rate_hot` to match observed performance.
 
+### Comfort window pre-cool target seems wrong
+The required pre-cool temperature is `target_temp − min(passive_overshoot, 8.0°F)` where `passive_overshoot` is how far the room would drift above target during the comfort window with no cooling. If evening heat is underestimated, the drift may be too small and the model won't recommend pre-cooling aggressively enough. Check that `thermal_lag_factor` is not zero and that `base_heat_gain_rate` is well-calibrated (run `smart_cooling.calibrate` with recent passive nights).
+
 ### Close window triggers too often or not enough
 The over-cooling close-window trigger fires when the room is at target and outside is ≥ 5°F below target. This threshold is not currently configurable; if your room cools aggressively on cold nights, ensure your `base_heat_gain_rate` and `thermal_transfer_coefficient` are tuned accurately so the model predicts this correctly.
 
@@ -503,6 +532,23 @@ Update to the latest version — fixed so `action_needed_by` returns `Unknown` w
 
 ### `will_reach_target_at` ticks to "now" every minute
 Update to the latest version — fixed so it returns `Unknown` when the room is already at or below target.
+
+---
+
+## Comfort Window
+
+The comfort window covers the period from bedtime to wake time — the hours when the room must *stay* comfortable, not just reach the target once.
+
+Configure it by setting a **Comfort window end entity** (`input_datetime`, e.g. wake time) in Step 4. Once set:
+
+1. After the target time (bedtime) is reached, the integration enters **comfort-window phase**
+2. It simulates how much the room will drift upward from target overnight with no active cooling
+3. It computes a **required pre-cool temperature** — typically 1–4°F below target — so that even as the room slowly re-heats, it stays within `comfort_tolerance` (default 2°F) until the comfort end time
+4. The strategy recommendation accounts for this lower pre-cool target, and may recommend starting AC or fan earlier than it otherwise would
+
+**Example:** Target temp 68°F, comfort tolerance 2°F (so 70°F is the ceiling), wake time 6:30 AM. If the model predicts the room drifts 3°F overnight without cooling, the required pre-cool target becomes 67°F and the strategy is chosen to reach that cooler temperature by bedtime.
+
+**`prefer_ac_during_comfort`** (default on): When the overhead of maintaining overnight comfort is calculated, AC is preferred over passive if this flag is on. Turn it off for rooms where noise is a priority (a cool-but-quiet preference).
 
 ---
 
