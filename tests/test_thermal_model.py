@@ -111,7 +111,7 @@ class TestThermalModel:
         
         assert isinstance(prediction, TemperaturePrediction)
         # Temperature should rise with outdoor hotter than indoor
-        assert prediction.predicted_bedtime_temp >= 75.0
+        assert prediction.predicted_target_temp >= 75.0
         assert prediction.cooling_deficit > 0  # Above target
         assert len(prediction.hourly_predictions) == 5  # 0-4 hours
 
@@ -140,7 +140,7 @@ class TestThermalModel:
         )
         
         # Fan should result in lower temperature
-        assert with_fan.predicted_bedtime_temp < no_cooling.predicted_bedtime_temp
+        assert with_fan.predicted_target_temp < no_cooling.predicted_target_temp
 
     def test_predict_temperature_with_ac(self, model: ThermalModel):
         """Test temperature prediction with AC cooling."""
@@ -167,7 +167,7 @@ class TestThermalModel:
         
         # AC should cool relative to no cooling, even if not below starting temp
         # In extreme heat, AC slows heat gain but may not fully cool
-        assert with_ac.predicted_bedtime_temp < no_cooling.predicted_bedtime_temp
+        assert with_ac.predicted_target_temp < no_cooling.predicted_target_temp
 
     def test_prediction_to_dict(self, model: ThermalModel):
         """Test prediction serialization."""
@@ -185,10 +185,13 @@ class TestThermalModel:
         )
         
         result = prediction.to_dict()
-        assert "predicted_bedtime_temp" in result
+        assert "predicted_target_temp" in result
         assert "cooling_deficit" in result
         assert "hourly_predictions" in result
-        assert isinstance(result["predicted_bedtime_temp"], float)
+        assert isinstance(result["predicted_target_temp"], float)
+        # Legacy alias keys must still be present for backward compatibility
+        assert result["predicted_bedtime_temp"] == result["predicted_target_temp"]
+        assert result["uncooled_bedtime_temp"] == result["uncooled_target_temp"]
 
     # ------------------------------------------------------------------
     # Solar model: extended window and thermal lag
@@ -374,7 +377,7 @@ class TestThermalModel:
             with_tracked, hours_ahead=4.0, cooling_strategy=None
         )
         # Thermal lag adds stored heat → predicted temp with lag must be warmer
-        assert result_with_lag.predicted_bedtime_temp > result_no_lag.predicted_bedtime_temp
+        assert result_with_lag.predicted_target_temp > result_no_lag.predicted_target_temp
 
     def test_forecast_solar_wins_when_higher_than_tracked(self, model: ThermalModel):
         """During the daytime the forecast may predict a higher afternoon peak than
@@ -403,6 +406,6 @@ class TestThermalModel:
         )
         # Both must produce nearly the same result: max(0.81, 0.1)==0.81 ≈ max(0.81, 0)==0.81
         assert abs(
-            result_low_tracked.predicted_bedtime_temp
-            - result_forecast_only.predicted_bedtime_temp
+            result_low_tracked.predicted_target_temp
+            - result_forecast_only.predicted_target_temp
         ) < 0.5

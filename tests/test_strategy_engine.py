@@ -57,36 +57,34 @@ class TestStrategyEngine:
         assert "already at" in strategy.reasoning.lower() or "comfort" in strategy.reasoning.lower()
 
     def test_recommends_fan_when_outdoor_cooler(self, engine: StrategyEngine, thermal_model: ThermalModel):
-        """Test fan recommendation when outdoor is significantly cooler."""
+        """Test fan recommendation when outdoor is significantly cooler and there is a real cooling need."""
         conditions = {
-            "indoor_temp": 74.0,  # Closer to target
-            "outdoor_temp": 62.0,  # Much cooler - good temp advantage
+            "indoor_temp": 78.0,  # Clearly above target — real cooling needed
+            "outdoor_temp": 62.0,  # Much cooler — large temp advantage
             "target_temp": 72.0,
             "aqi": 50,  # Good air quality
             "wind_speed": 12.0,  # Good wind
             "window_open": False,
             "fan_running": False,
             "ac_running": False,
-            "current_time": datetime(2024, 7, 15, 21, 0),  # Evening
+            "current_time": datetime(2024, 7, 15, 20, 0),  # Evening — 4h to target
             "bedtime": "22:30:00",
         }
         
         prediction = thermal_model.predict_temperature(
             current_conditions=conditions,
-            hours_ahead=1.5,  # Only 1.5 hours to bedtime
+            hours_ahead=2.5,
             cooling_strategy=None,
         )
         
         strategy = engine.recommend(conditions, prediction)
         
-        # With 12°F temp advantage and short timeframe, should recommend 
-        # natural cooling methods (fan or window), or at minimum not AC
-        # as the primary choice when natural cooling would work
+        # With 16°F temp advantage, good wind, 6°F cooling need, and 2.5h window,
+        # the engine must recommend natural cooling (fan or open window) — not AC or no_action.
         assert strategy.method in [
             CoolingMethod.START_FAN,
             CoolingMethod.OPEN_WINDOW,
-            CoolingMethod.NO_ACTION,  # May not need action if deficit is small
-        ] or strategy.predicted_temp <= conditions["target_temp"] + 2
+        ], f"Expected fan or window strategy, got {strategy.method} (reasoning: {strategy.reasoning})"
 
     def test_recommends_ac_when_hot_outside(self, engine: StrategyEngine, thermal_model: ThermalModel):
         """Test AC recommendation when outdoor is hot."""

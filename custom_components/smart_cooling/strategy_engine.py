@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -130,17 +130,23 @@ class StrategyEngine:
         # --- Close-window check ---
         # If window is open but outdoor conditions make it counterproductive, say so
         # before evaluating cooling strategies.
+        effective_comfort_tolerance = (
+            comfort_data.get("comfort_tolerance", self.comfort_tolerance)
+            if comfort_data
+            else self.comfort_tolerance
+        )
         if window_open:
             close_reason = self._close_window_reason(
                 indoor_temp, outdoor_temp, target_temp, aqi, cooling_deficit,
                 wind_speed=wind_speed,
-                predicted_open_temp=prediction.predicted_bedtime_temp,
+                predicted_open_temp=prediction.predicted_target_temp,
+                comfort_tolerance=effective_comfort_tolerance,
             )
             if close_reason:
                 return CoolingStrategy(
                     method=CoolingMethod.CLOSE_WINDOW,
                     timing="",
-                    predicted_temp=prediction.predicted_bedtime_temp,
+                    predicted_temp=prediction.predicted_target_temp,
                     target_temp=target_temp,
                     reasoning=close_reason,
                     confidence=0.9,
@@ -162,11 +168,11 @@ class StrategyEngine:
             return CoolingStrategy(
                 method=CoolingMethod.NO_ACTION,
                 timing="",
-                predicted_temp=prediction.predicted_bedtime_temp,
+                predicted_temp=prediction.predicted_target_temp,
                 target_temp=target_temp,
                 reasoning=self._no_action_reasoning(
                     indoor_temp, target_temp, outdoor_temp, ac_running, fan_running,
-                    prediction.predicted_bedtime_temp, hours_to_target,
+                    prediction.predicted_target_temp, hours_to_target,
                     current_conditions,
                 ),
                 confidence=0.9,
@@ -402,7 +408,7 @@ class StrategyEngine:
         return CoolingStrategy(
             method=method,
             timing=timing,
-            predicted_temp=best_strategy["prediction"].predicted_bedtime_temp,
+            predicted_temp=best_strategy["prediction"].predicted_target_temp,
             target_temp=target_temp,
             reasoning=reasoning,
             confidence=0.7 if best_strategy["achieves_target"] else 0.4,
@@ -411,7 +417,7 @@ class StrategyEngine:
             alternatives=[
                 {
                     "method": s["method"].value,
-                    "predicted_temp": round(s["prediction"].predicted_bedtime_temp, 1),
+                    "predicted_temp": round(s["prediction"].predicted_target_temp, 1),
                     "hours_to_cool": round(s["hours_to_cool"], 1) if s["hours_to_cool"] is not None else None,
                     "start_hours_from_now": round(s["start_hours_from_now"], 2) if s["start_hours_from_now"] is not None else None,
                     "achieves_target": s["achieves_target"],
@@ -430,6 +436,7 @@ class StrategyEngine:
         cooling_deficit: float,
         wind_speed: float = 0.0,
         predicted_open_temp: float | None = None,
+        comfort_tolerance: float | None = None,
     ) -> str | None:
         """Return a reason string if the open window should be closed, else None."""
         # Bad air quality — always close
@@ -445,7 +452,8 @@ class StrategyEngine:
                 f"({indoor_temp:.1f}°F) — the window is adding heat, not removing it."
             )
         # Room is already at or well below target and outside is much colder — over-cooling risk
-        if cooling_deficit <= self.comfort_tolerance and outdoor_temp < target_temp - 5.0:
+        effective_tolerance = comfort_tolerance if comfort_tolerance is not None else self.comfort_tolerance
+        if cooling_deficit <= effective_tolerance and outdoor_temp < target_temp - 5.0:
             excess = indoor_temp - outdoor_temp
             # Explain what is driving the predicted cool-down: wind or walls
             if wind_speed < 2.0:
@@ -498,7 +506,7 @@ class StrategyEngine:
         outdoor_temp: float,
         ac_running: bool,
         fan_running: bool,
-        predicted_bedtime_temp: float | None = None,
+        predicted_target_temp: float | None = None,
         hours_to_target: float = 0.0,
         conditions: dict[str, Any] | None = None,
     ) -> str:
@@ -539,13 +547,13 @@ class StrategyEngine:
         # Warn only if the room is predicted to drop into genuinely cold territory
         cold_threshold = 64.0
         if (
-            predicted_bedtime_temp is not None
+            predicted_target_temp is not None
             and hours_to_target > 0
-            and predicted_bedtime_temp < cold_threshold
+            and predicted_target_temp < cold_threshold
         ):
             target_label = self._format_target_time(conditions) if conditions else "target time"
             parts.append(
-                f"Room is predicted to drop to ~{predicted_bedtime_temp:.0f}°F "
+                f"Room is predicted to drop to ~{predicted_target_temp:.0f}°F "
                 f"by {target_label} — consider adding heat if that's too cold"
             )
 
@@ -654,12 +662,10 @@ class StrategyEngine:
         forecast_temps: list[float] = []
         forecast_humidities: list[float] = []
         if forecast:
-            from datetime import timezone as _tz
-
             def _to_utc(dt: datetime) -> datetime:
                 if dt.tzinfo is None:
-                    return dt.replace(tzinfo=_tz.utc)
-                return dt.astimezone(_tz.utc)
+                    return dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
 
             window_end_utc = _to_utc(current_time + timedelta(hours=hours_to_target))
             now_utc = _to_utc(current_time)
@@ -851,7 +857,7 @@ class StrategyEngine:
         if not achieves:
             if not ac_available:
                 # AC is not available — warn about predicted temperature instead
-                predicted_temp = strategy["prediction"].predicted_bedtime_temp
+                predicted_temp = strategy["prediction"].predicted_target_temp
                 overshoot = predicted_temp - target_temp
                 parts.append(
                     f"Without AC, the room is predicted to reach "

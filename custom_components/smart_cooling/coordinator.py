@@ -312,6 +312,42 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         state = self.hass.states.get(entity_id)
         return state is not None and state.state not in ("unknown", "unavailable")
 
+    @staticmethod
+    def _extract_peak(
+        hourly: list[dict],
+    ) -> tuple[float, str] | tuple[None, None]:
+        """Return (peak_temp, iso_time_rounded_30min) from hourly_predictions."""
+        if not hourly:
+            return None, None
+        peak_entry = max(hourly, key=lambda h: h["predicted_temp"])
+        peak_temp = round(peak_entry["predicted_temp"], 1)
+        try:
+            raw = datetime.fromisoformat(peak_entry["time"])
+            total_minutes = raw.hour * 60 + raw.minute
+            rounded_minutes = round(total_minutes / 30) * 30
+            rounded = raw.replace(
+                hour=rounded_minutes // 60 % 24,
+                minute=rounded_minutes % 60,
+                second=0,
+                microsecond=0,
+            )
+            peak_time = rounded.isoformat()
+        except (ValueError, AttributeError):
+            peak_time = peak_entry["time"]
+        return peak_temp, peak_time
+
+    @staticmethod
+    def _round_to_5min(dt: datetime) -> datetime:
+        """Round a datetime to the nearest 5-minute mark to reduce sensor churn."""
+        total_seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
+        rounded_seconds = round(total_seconds / 300) * 300
+        return dt.replace(
+            hour=rounded_seconds // 3600 % 24,
+            minute=(rounded_seconds % 3600) // 60,
+            second=0,
+            microsecond=0,
+        )
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from sensors and compute recommendations."""
         try:
@@ -606,31 +642,6 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # with the window open (natural ventilation) vs. closed (walls only)?
             # Always uses a fixed 24h horizon so the peak is captured regardless
             # of how far away the target time is.
-            def _extract_peak(
-                hourly: list[dict],
-            ) -> tuple[float, str] | tuple[None, None]:
-                """Return (peak_temp, iso_time_rounded_30min) from hourly_predictions."""
-                if not hourly:
-                    return None, None
-                peak_entry = max(hourly, key=lambda h: h["predicted_temp"])
-                peak_temp = round(peak_entry["predicted_temp"], 1)
-                # Round to nearest 30 minutes to reduce churn
-                try:
-                    from datetime import datetime as _dt
-                    raw = _dt.fromisoformat(peak_entry["time"])
-                    total_minutes = raw.hour * 60 + raw.minute
-                    rounded_minutes = round(total_minutes / 30) * 30
-                    rounded = raw.replace(
-                        hour=rounded_minutes // 60 % 24,
-                        minute=rounded_minutes % 60,
-                        second=0,
-                        microsecond=0,
-                    )
-                    peak_time = rounded.isoformat()
-                except Exception:
-                    peak_time = peak_entry["time"]
-                return peak_temp, peak_time
-
             peak_24h_closed_pred = self.thermal_model.predict_temperature(
                 current_conditions=current_conditions,
                 hours_ahead=24,
@@ -641,10 +652,10 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hours_ahead=24,
                 cooling_strategy="natural",
             )
-            peak_temp_closed, peak_at_closed = _extract_peak(
+            peak_temp_closed, peak_at_closed = self._extract_peak(
                 peak_24h_closed_pred.hourly_predictions
             )
-            peak_temp_open, peak_at_open = _extract_peak(
+            peak_temp_open, peak_at_open = self._extract_peak(
                 peak_24h_open_pred.hourly_predictions
             )
 
@@ -661,22 +672,11 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hours_until_cool = None
 
             # `now` was defined earlier (comfort window block) — reuse it here.
-            def _round_to_5min(dt: datetime) -> datetime:
-                """Round a datetime to the nearest 5-minute mark to reduce sensor churn."""
-                total_seconds = (dt.hour * 3600 + dt.minute * 60 + dt.second)
-                rounded_seconds = round(total_seconds / 300) * 300
-                return dt.replace(
-                    hour=rounded_seconds // 3600 % 24,
-                    minute=(rounded_seconds % 3600) // 60,
-                    second=0,
-                    microsecond=0,
-                )
-
             # Datetime when room will reach target.
             # hours_until_cool == 0.0 means already at/below target — treat as None
             # so the sensor stays stable instead of ticking to "now" every minute.
             if hours_until_cool is not None and hours_until_cool > 0.0:
-                will_reach_target_at = _round_to_5min(now + timedelta(hours=hours_until_cool))
+                will_reach_target_at = self._round_to_5min(now + timedelta(hours=hours_until_cool))
             else:
                 will_reach_target_at = None
 
@@ -691,10 +691,10 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elif strat_start is not None and strat_cool is not None:
                 # Anchor to target_datetime - cooling_duration (fixed wall clock time).
                 # Using now + strat_start would slide by 1 min every coordinator cycle.
-                action_needed_by = _round_to_5min(target_datetime - timedelta(hours=strat_cool))
+                action_needed_by = self._round_to_5min(target_datetime - timedelta(hours=strat_cool))
             else:
                 # Strategy achieves_target is False — action needed immediately
-                action_needed_by = _round_to_5min(now)
+                action_needed_by = self._round_to_5min(now)
             
             # Check if any earlier predictions' target time has now passed and
             # record the actual indoor temp so the learning module can score them.

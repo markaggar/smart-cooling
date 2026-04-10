@@ -16,7 +16,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, MANUFACTURER
+from .const import DOMAIN, MANUFACTURER, MODEL, SW_VERSION
 from .const import (
     CONF_WEATHER_ENTITY,
     CONF_OUTDOOR_TEMP_SENSOR,
@@ -86,8 +86,8 @@ class SmartCoolingBaseSensor(CoordinatorEntity[SmartCoolingCoordinator], SensorE
             identifiers={(DOMAIN, self._entry.entry_id)},
             name=self.coordinator.room_name,
             manufacturer=MANUFACTURER,
-            model="Smart Cooling Controller",
-            sw_version="0.1.0",
+            model=MODEL,
+            sw_version=SW_VERSION,
         )
 
 
@@ -158,7 +158,7 @@ class SmartCoolingPredictedTempSensor(SmartCoolingBaseSensor):
             return None
         prediction = self.coordinator.data.get("prediction")
         if prediction:
-            return round(prediction.predicted_bedtime_temp, 1)
+            return round(prediction.predicted_target_temp, 1)
         return None
 
     @property
@@ -211,7 +211,7 @@ class SmartCoolingPredictedWithActionSensor(SmartCoolingBaseSensor):
             return None
         with_action = self.coordinator.data.get("with_action_prediction")
         if with_action:
-            return round(with_action.predicted_bedtime_temp, 1)
+            return round(with_action.predicted_target_temp, 1)
         return None
 
     @property

@@ -1,8 +1,17 @@
 """Constants for Smart Cooling integration."""
+import json
+from pathlib import Path
 from typing import Final
 
 DOMAIN: Final = "smart_cooling"
 MANUFACTURER: Final = "markaggar"
+
+try:
+    _manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
+except (FileNotFoundError, OSError, json.JSONDecodeError):
+    _manifest = {}
+MODEL: Final[str] = _manifest.get("name", "Smart Cooling")
+SW_VERSION: Final[str] = _manifest.get("version", "0.0.0")
 
 # =============================================================================
 # GLOBAL CONFIGURATION (shared across all room instances)
