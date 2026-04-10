@@ -115,7 +115,7 @@ DEFAULT_PHYSICS_PARAMS: Final = {
     "ac_cooling_rate_mild": 4.5,  # °F/hr when outdoor < 82°F
     "ac_cooling_rate_hot": 2.5,  # °F/hr when outdoor >= 82°F
     "natural_cooling_effectiveness": 0.15,  # natural ventilation coefficient
-    "fan_cooling_effectiveness": 0.15,  # fan ventilation coefficient
+    "fan_cooling_effectiveness": 0.30,  # fan ventilation coefficient (~2-3°F/hr at 10°F diff)
     "fan_equivalent_wind_speed": 8.0,  # mph equivalent wind from fan
     "fan_boost_factor": 1.4,  # multiplier when fan + wind
     "thermal_transfer_coefficient": 0.1,  # heat transfer through walls

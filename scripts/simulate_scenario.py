@@ -323,19 +323,53 @@ BUILTIN_SCENARIOS: list[dict[str, Any]] = [
         "expected_timing_contains": None,
     },
     # ------------------------------------------------------------------
-    # 6. Close call — tight window, fan only viable at last hour
+    # 6. High outdoor advantage — fan can start right now
     # ------------------------------------------------------------------
     {
-        "name": "Tight window — fan barely viable at last hour",
+        "name": "High outdoor advantage — start fan immediately",
         "description": (
-            "Room 70°F at 8 PM, 2h window to 10 PM target 65°F. "
-            "Outdoor drops to 52°F by 9 PM.  Fan should succeed."
+            "Room 76°F at 9 PM, outdoor already 58°F (18°F advantage), "
+            "1.5h window to 10:30 PM target of 68°F.  "
+            "Fan achieves target; natural ventilation is too slow to make it."
         ),
         "conditions": {
-            "indoor_temp": 70.0,
-            "outdoor_temp": 68.0,
-            "outdoor_humidity": 55.0,
-            "aqi": 45.0,
+            "indoor_temp": 76.0,
+            "outdoor_temp": 58.0,
+            "outdoor_humidity": 45.0,
+            "aqi": 35.0,
+            "wind_speed": 5.0,
+            "target_temp": 68.0,
+            "target_time": "22:30:00",
+            "current_time": _now_at(21, 0),
+            "window_open": False,
+            "fan_running": False,
+            "ac_running": False,
+            "fan_available": True,
+            "ac_available": True,
+            "fan_sensor_configured": True,
+            "ac_sensor_configured": True,
+            "window_sensor_configured": True,
+            "ac_setpoint": 83.0,
+            "forecast": _forecast_ramp(21, 58.0, 54.0, hours=5),
+        },
+        "expected_method": "start_fan",
+        "expected_timing_contains": None,
+    },
+    # ------------------------------------------------------------------
+    # 7. High outdoor humidity — fan rate degraded, AC preferred
+    # ------------------------------------------------------------------
+    {
+        "name": "High humidity — fan too slow, AC preferred",
+        "description": (
+            "Room 73°F at 8 PM, outdoor 64°F (good differential), "
+            "but 90%% outdoor humidity cuts fan effectiveness by 25%%.  "
+            "Fan cannot cool 8°F within the 2h window; AC can."
+        ),
+        "conditions": {
+            "indoor_temp": 73.0,
+            "outdoor_temp": 64.0,
+            "outdoor_humidity": 90.0,
+            "aqi": 30.0,
             "wind_speed": 5.0,
             "target_temp": 65.0,
             "target_time": "22:00:00",
@@ -349,9 +383,9 @@ BUILTIN_SCENARIOS: list[dict[str, Any]] = [
             "ac_sensor_configured": True,
             "window_sensor_configured": True,
             "ac_setpoint": 83.0,
-            "forecast": _forecast_ramp(20, 68.0, 52.0, hours=4),
+            "forecast": _forecast_ramp(20, 64.0, 57.0, hours=5),
         },
-        "expected_method": "start_fan",
+        "expected_method": "start_ac",
         "expected_timing_contains": None,
     },
 ]
