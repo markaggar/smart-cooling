@@ -1,0 +1,44 @@
+# Master Bedroom — Cool evening, fan should defer to ~9 PM
+#
+# This mirrors the real-world scenario that triggered the forward-scan redesign:
+# outdoor air is barely cooler than indoor NOW, but drops significantly by target time.
+# The engine should NOT start the fan immediately — it should find the latest viable
+# start time and say "Start fan by 9:00 PM" rather than "NOW!"
+
+name: "Master Bedroom — cool evening fan deferred"
+description: >
+  Room 68°F at 4 PM, outdoor 65°F but dropping to 53°F by 10 PM.
+  Target 63°F by 10:00 PM (6h window).  AQI clean.
+  Expected: start_fan, deferred ("by" in timing, not NOW!).
+
+expected_method: start_fan
+expected_timing_contains: "by"
+
+conditions:
+  indoor_temp: 68.0
+  outdoor_temp: 65.0
+  outdoor_humidity: 55.0
+  aqi: 42.0
+  wind_speed: 5.0
+  target_temp: 63.0
+  target_time: "22:00:00"
+  current_time: "2026-04-09T16:00:00"
+
+  window_open: false
+  fan_running: false
+  ac_running: false
+  fan_available: true
+  ac_available: true
+  fan_sensor_configured: true
+  ac_sensor_configured: true
+  window_sensor_configured: true
+  ac_setpoint: 83.0
+
+  forecast:
+    - {datetime: "2026-04-09T16:00:00", temperature: 65.0, wind_speed: 5.0, precipitation: 0.0, humidity: 55.0}
+    - {datetime: "2026-04-09T17:00:00", temperature: 63.0, wind_speed: 5.0, precipitation: 0.0, humidity: 57.0}
+    - {datetime: "2026-04-09T18:00:00", temperature: 61.0, wind_speed: 6.0, precipitation: 0.0, humidity: 58.0}
+    - {datetime: "2026-04-09T19:00:00", temperature: 59.0, wind_speed: 6.0, precipitation: 0.0, humidity: 60.0}
+    - {datetime: "2026-04-09T20:00:00", temperature: 57.0, wind_speed: 7.0, precipitation: 0.0, humidity: 62.0}
+    - {datetime: "2026-04-09T21:00:00", temperature: 55.0, wind_speed: 7.0, precipitation: 0.0, humidity: 64.0}
+    - {datetime: "2026-04-09T22:00:00", temperature: 53.0, wind_speed: 8.0, precipitation: 0.0, humidity: 65.0}
