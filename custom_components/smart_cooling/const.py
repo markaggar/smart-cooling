@@ -119,6 +119,7 @@ DEFAULT_PHYSICS_PARAMS: Final = {
     "fan_equivalent_wind_speed": 8.0,  # mph equivalent wind from fan
     "fan_boost_factor": 1.4,  # multiplier when fan + wind
     "thermal_transfer_coefficient": 0.1,  # heat transfer through walls
+    "thermal_lag_factor": 0.5,  # wall/attic re-radiation after sunny afternoons (learnable)
 }
 
 # =============================================================================

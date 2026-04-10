@@ -189,3 +189,158 @@ class TestThermalModel:
         assert "cooling_deficit" in result
         assert "hourly_predictions" in result
         assert isinstance(result["predicted_bedtime_temp"], float)
+
+    # ------------------------------------------------------------------
+    # Solar model: extended window and thermal lag
+    # ------------------------------------------------------------------
+
+    def test_heat_gain_morning_solar(self, model: ThermalModel):
+        """Solar gain should now contribute at 10 AM (was zero before noon)."""
+        heat_gain_10am = model.calculate_heat_gain(
+            hour=10,
+            outdoor_temp=75.0,
+            indoor_temp=70.0,
+            cloud_coverage=0.0,   # clear sky
+            uv_index=7.0,
+        )
+        heat_gain_midnight = model.calculate_heat_gain(
+            hour=0,
+            outdoor_temp=75.0,
+            indoor_temp=70.0,
+            cloud_coverage=0.0,
+            uv_index=0.0,
+        )
+        # On a clear morning, solar contribution should raise heat gain above
+        # the midnight baseline (same temp differential, no UV at night).
+        assert heat_gain_10am > heat_gain_midnight
+
+    def test_heat_gain_solar_peaks_early_afternoon(self, model: ThermalModel):
+        """Solar gain should be higher at 1 PM than at 5 PM (same UV, same cloud)."""
+        common = dict(outdoor_temp=80.0, indoor_temp=72.0, cloud_coverage=10.0, uv_index=9.0)
+        heat_1pm = model.calculate_heat_gain(hour=13, **common)
+        heat_5pm = model.calculate_heat_gain(hour=17, **common)
+        assert heat_1pm > heat_5pm
+
+    def test_heat_gain_cloudy_less_than_clear(self, model: ThermalModel):
+        """Heavy cloud cover should reduce solar gain at the same hour and UV."""
+        common = dict(hour=13, outdoor_temp=80.0, indoor_temp=72.0, uv_index=6.0)
+        heat_clear = model.calculate_heat_gain(cloud_coverage=5.0, **common)
+        heat_cloudy = model.calculate_heat_gain(cloud_coverage=90.0, **common)
+        assert heat_clear > heat_cloudy
+
+    def test_thermal_lag_increases_evening_heat_gain(self, model: ThermalModel):
+        """Afternoon solar load should increase heat gain in the evening hours."""
+        common = dict(hour=20, outdoor_temp=65.0, indoor_temp=70.0,
+                      cloud_coverage=50.0, uv_index=0.0)
+        no_lag = model.calculate_heat_gain(afternoon_solar_load=0.0, **common)
+        with_lag = model.calculate_heat_gain(afternoon_solar_load=0.8, **common)
+        assert with_lag > no_lag
+
+    def test_thermal_lag_decays_by_midnight(self, model: ThermalModel):
+        """Thermal lag should be smaller at midnight than at 8 PM (same load)."""
+        common = dict(outdoor_temp=62.0, indoor_temp=68.0,
+                      cloud_coverage=20.0, uv_index=0.0, afternoon_solar_load=1.0)
+        heat_8pm = model.calculate_heat_gain(hour=20, **common)
+        heat_midnight = model.calculate_heat_gain(hour=0, **common)
+        # Midnight (lag_hours=10) should have smaller thermal lag contribution
+        assert heat_midnight < heat_8pm
+
+    def test_thermal_lag_zero_without_afternoon_solar(self, model: ThermalModel):
+        """When afternoon_solar_load=0, evening heat gain should equal no-forecast baseline."""
+        heat_gain = model.calculate_heat_gain(
+            hour=21,
+            outdoor_temp=60.0,
+            indoor_temp=70.0,
+            cloud_coverage=80.0,
+            uv_index=0.0,
+            afternoon_solar_load=0.0,
+        )
+        # Should be the same result as not passing afternoon_solar_load at all
+        baseline = model.calculate_heat_gain(
+            hour=21,
+            outdoor_temp=60.0,
+            indoor_temp=70.0,
+            cloud_coverage=80.0,
+            uv_index=0.0,
+        )
+        assert heat_gain == baseline
+
+    # ------------------------------------------------------------------
+    # Comfort window: overnight drift and pre-cool target
+    # ------------------------------------------------------------------
+
+    def test_simulate_comfort_window_passive_drift(self, model: ThermalModel):
+        """Room should warm up overnight with no cooling in a hot room."""
+        conditions = {
+            "indoor_temp": 68.0,
+            "outdoor_temp": 72.0,
+            "target_temp": 68.0,
+            "outdoor_humidity": 55.0,
+            "current_time": datetime(2024, 7, 15, 22, 0),
+            "forecast": [],
+        }
+        result = model.simulate_comfort_window(
+            current_conditions=conditions,
+            start_temp=68.0,
+            start_time=datetime(2024, 7, 15, 22, 0),
+            window_hours=8.0,
+            cooling_strategy=None,
+        )
+        # With outdoor 4°F warmer, room should end warmer than it started
+        assert result["end_temp"] > 68.0
+        assert result["peak_temp"] >= result["end_temp"]
+
+    def test_simulate_comfort_window_ac_maintains_setpoint(self, model: ThermalModel):
+        """Room with AC active should stay near target throughout the window."""
+        conditions = {
+            "indoor_temp": 68.0,
+            "outdoor_temp": 75.0,
+            "target_temp": 68.0,
+            "outdoor_humidity": 50.0,
+            "current_time": datetime(2024, 7, 15, 22, 0),
+            "forecast": [],
+        }
+        result_passive = model.simulate_comfort_window(
+            current_conditions=conditions,
+            start_temp=68.0,
+            start_time=datetime(2024, 7, 15, 22, 0),
+            window_hours=8.0,
+            cooling_strategy=None,
+        )
+        result_ac = model.simulate_comfort_window(
+            current_conditions=conditions,
+            start_temp=68.0,
+            start_time=datetime(2024, 7, 15, 22, 0),
+            window_hours=8.0,
+            cooling_strategy="ac",
+        )
+        # AC should keep the room cooler than passive drift
+        assert result_ac["peak_temp"] < result_passive["peak_temp"]
+
+    def test_get_peak_afternoon_solar_from_forecast(self, model: ThermalModel):
+        """Helper should find the highest UV/cloud-adjusted solar entry at 9-17h."""
+        forecast = [
+            {"datetime": datetime(2024, 7, 15, 10, 0), "uv_index": 5.0,
+             "cloud_coverage": 0.0, "temperature": 78.0},
+            {"datetime": datetime(2024, 7, 15, 13, 0), "uv_index": 9.0,
+             "cloud_coverage": 10.0, "temperature": 85.0},
+            {"datetime": datetime(2024, 7, 15, 20, 0), "uv_index": 0.0,
+             "cloud_coverage": 20.0, "temperature": 70.0},
+        ]
+        load = model._get_peak_afternoon_solar(forecast)
+        # 1 PM entry: 0.9 × 0.90 = 0.81; should be returned
+        assert 0.8 < load <= 1.0
+
+    def test_get_peak_afternoon_solar_empty_forecast(self, model: ThermalModel):
+        """Empty forecast should safely return 0 (no thermal lag)."""
+        assert model._get_peak_afternoon_solar([]) == 0.0
+
+    def test_get_peak_afternoon_solar_night_only_forecast(self, model: ThermalModel):
+        """Night-only forecast entries should return 0 (no afternoon data)."""
+        forecast = [
+            {"datetime": datetime(2024, 7, 15, 21, 0), "uv_index": 0.0,
+             "cloud_coverage": 40.0, "temperature": 62.0},
+            {"datetime": datetime(2024, 7, 15, 22, 0), "uv_index": 0.0,
+             "cloud_coverage": 30.0, "temperature": 60.0},
+        ]
+        assert model._get_peak_afternoon_solar(forecast) == 0.0

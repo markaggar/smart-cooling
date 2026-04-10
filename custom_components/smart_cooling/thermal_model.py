@@ -86,6 +86,7 @@ class ThermalModel:
         indoor_temp: float,
         cloud_coverage: float = 50.0,
         uv_index: float = 0.0,
+        afternoon_solar_load: float = 0.0,
     ) -> float:
         """Calculate heat gain rate in °F/hr for a given hour.
         
@@ -95,25 +96,51 @@ class ThermalModel:
             indoor_temp: Inside temperature in °F
             cloud_coverage: Cloud coverage percentage (0-100)
             uv_index: UV index (0-11+)
+            afternoon_solar_load: Peak solar fraction (0-1) from today's forecast
+                (used for thermal lag calculation). Defaults to 0 (no lag).
             
         Returns:
             Heat gain rate in °F/hr (positive = warming, negative = cooling)
         """
         base_gain = self.params["base_heat_gain_rate"]
-        
-        # Solar gain component (only during daylight, peak at solar noon)
+
+        # cloud_factor is used by both the direct solar window and the thermal lag.
+        cloud_factor = (100.0 - cloud_coverage) / 100.0
+
+        # Solar gain component: active 8 AM to 7 PM with a linear ramp peaking at 1 PM.
+        # This captures morning wall heating (east/south exposure) that the previous
+        # noon-only window missed.
         solar_multiplier = 0.0
-        if 12 <= hour <= 18:
+        if 8 <= hour <= 19:
+            if hour <= 13:
+                solar_hour_factor = (hour - 8) / 5.0   # 0 at 8 AM → 1.0 at 1 PM
+            else:
+                solar_hour_factor = (19 - hour) / 6.0  # 1.0 at 1 PM → 0 at 7 PM
             uv_factor = uv_index / 10.0
-            cloud_factor = (100 - cloud_coverage) / 100.0
-            solar_multiplier = uv_factor * cloud_factor * self.params["solar_gain_factor"]
-        
+            solar_multiplier = uv_factor * cloud_factor * solar_hour_factor * self.params["solar_gain_factor"]
+
         # Ambient heat transfer (outdoor-indoor differential)
         temp_diff = outdoor_temp - indoor_temp
         ambient_gain = temp_diff * self.params["thermal_transfer_coefficient"]
-        
-        total_gain = base_gain * (1 + solar_multiplier) + ambient_gain
-        
+
+        # Thermal lag: walls and attic absorb solar energy during the afternoon and
+        # re-radiate it into the room for several hours after sunset.
+        # Model: exponential decay from thermal peak at ~2 PM, scaled by how sunny
+        # the afternoon was (afternoon_solar_load = 0 when unavailable → no lag).
+        thermal_lag_gain = 0.0
+        if afternoon_solar_load > 0.0:
+            lag_hours = (hour - 14) % 24  # hours since thermal peak; handles midnight wrap
+            if lag_hours < 12:            # only apply up to ~2 AM
+                decay = math.exp(-lag_hours / 4.0)  # 4-hour time constant
+                thermal_lag_gain = (
+                    afternoon_solar_load
+                    * self.params["thermal_lag_factor"]
+                    * base_gain
+                    * decay
+                )
+
+        total_gain = base_gain * (1 + solar_multiplier) + ambient_gain + thermal_lag_gain
+
         # Heat gain can't be negative if outdoor is hotter
         if outdoor_temp > indoor_temp:
             return max(total_gain, 0.0)
@@ -204,10 +231,13 @@ class ThermalModel:
         # Simulate temperature evolution hour by hour
         hourly_predictions = []
         simulated_temp = indoor_temp
-        
+
+        # Compute once: peak afternoon solar load for thermal lag
+        peak_afternoon_solar = self._get_peak_afternoon_solar(forecast)
+
         hours_to_simulate = int(hours_ahead) + 1
         
-        for i in range(hours_to_simulate):
+        for i in range(hours_to_simulate):            
             future_time = current_time + timedelta(hours=i)
             hour = future_time.hour
             
@@ -224,9 +254,8 @@ class ThermalModel:
                 indoor_temp=simulated_temp,
                 cloud_coverage=cloud_coverage,
                 uv_index=uv_index,
+                afternoon_solar_load=peak_afternoon_solar,
             )
-            
-            # Apply cooling if strategy specified
             cooling = 0.0
             hour_humidity = forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0))
             if cooling_strategy == "fan":
@@ -338,6 +367,9 @@ class ThermalModel:
         steps = int(max_hours / step_hours)
         simulated_temp = indoor_temp
 
+        # Compute once: peak afternoon solar load for thermal lag
+        peak_afternoon_solar = self._get_peak_afternoon_solar(forecast)
+
         for i in range(steps):
             elapsed_hours = i * step_hours
             future_time = current_time + timedelta(hours=elapsed_hours)
@@ -354,6 +386,7 @@ class ThermalModel:
                 indoor_temp=simulated_temp,
                 cloud_coverage=cloud_coverage,
                 uv_index=uv_index,
+                afternoon_solar_load=peak_afternoon_solar,
             )
 
             cooling = 0.0
@@ -437,6 +470,9 @@ class ThermalModel:
         peak_temp = start_temp
         peak_at = start_time.isoformat()
 
+        # Compute once: peak afternoon solar load for thermal lag
+        peak_afternoon_solar = self._get_peak_afternoon_solar(forecast)
+
         hours_to_simulate = int(window_hours) + 1
 
         for i in range(hours_to_simulate):
@@ -455,6 +491,7 @@ class ThermalModel:
                 indoor_temp=simulated_temp,
                 cloud_coverage=cloud_coverage,
                 uv_index=uv_index,
+                afternoon_solar_load=peak_afternoon_solar,
             )
 
             cooling = 0.0
@@ -516,6 +553,49 @@ class ThermalModel:
             "end_temp": round(simulated_temp, 1),
             "hourly_predictions": hourly_predictions,
         }
+
+    def _get_peak_afternoon_solar(self, forecast: list[dict]) -> float:
+        """Return the peak afternoon solar intensity (0-1) from the forecast.
+
+        Scans all forecast entries for hours 9-17 and returns the highest
+        cloud-adjusted UV fraction.  Used to estimate wall thermal lag for
+        evening simulations — returns 0.0 when no afternoon data is available,
+        which safely disables the thermal-lag term.
+        """
+        if not forecast:
+            return 0.0
+
+        from datetime import timezone as _tz
+
+        peak_solar = 0.0
+        for entry in forecast:
+            entry_time = entry.get("datetime")
+            if entry_time is None:
+                continue
+            try:
+                if isinstance(entry_time, str):
+                    entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+                elif isinstance(entry_time, datetime):
+                    entry_dt = entry_time
+                else:
+                    continue
+                # Normalise to naive local for hour comparison
+                if entry_dt.tzinfo is not None:
+                    entry_dt = entry_dt.astimezone(_tz.utc).replace(tzinfo=None)
+            except (ValueError, AttributeError, OverflowError):
+                continue
+
+            if not (9 <= entry_dt.hour <= 17):
+                continue
+
+            uv = float(entry.get("uv_index", 0.0))
+            cloud = float(entry.get("cloud_coverage", 50.0))
+            cloud_factor = (100.0 - cloud) / 100.0
+            solar = (uv / 10.0) * cloud_factor
+            if solar > peak_solar:
+                peak_solar = solar
+
+        return min(peak_solar, 1.0)
 
     def _get_forecast_for_hour(
         self, forecast: list[dict], target_time: datetime
