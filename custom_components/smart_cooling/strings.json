@@ -8,7 +8,8 @@
                 "data": {
                     "weather_entity": "Weather entity (hourly forecast)",
                     "outdoor_temp_sensor": "Outdoor temperature sensor",
-                    "aqi_sensor": "Air quality index sensor (optional)"
+                    "aqi_sensor": "Air quality index sensor (optional)",
+                    "peak_schedule": "Peak electricity schedule (optional) - schedule entity where 'on' = peak/expensive hours (e.g. 3 PM\u20139 PM). AC will be deferred to off-peak when time permits."
                 }
             },
             "room": {
@@ -39,8 +40,7 @@
                     "learning_enabled": "Enable learning from predictions",
                     "comfort_end_entity": "Comfort window end time (input_datetime) - wake time / end of overnight comfort period (optional)",
                     "comfort_tolerance": "Comfort tolerance (\u00b0F) - how far above target is still acceptable during the comfort window",
-                    "prefer_ac_during_comfort": "Prefer AC during comfort window - run AC overnight to maintain comfort (disable for quiet bedrooms or rooms without AC)",
-                    "peak_schedule": "Peak electricity schedule (optional) - schedule entity where 'on' = peak/expensive hours (e.g. 3 PM\u20139 PM). AC will be deferred to off-peak when time permits."
+                    "prefer_ac_during_comfort": "Prefer AC during comfort window - run AC overnight to maintain comfort (disable for quiet bedrooms or rooms without AC)"
                 }
             }
         },
@@ -88,7 +88,8 @@
                 "data": {
                     "weather_entity": "Weather entity (hourly forecast)",
                     "outdoor_temp_sensor": "Outdoor temperature sensor",
-                    "aqi_sensor": "Air quality index sensor"
+                    "aqi_sensor": "Air quality index sensor",
+                    "peak_schedule": "Peak electricity schedule (optional)"
                 }
             }
         }

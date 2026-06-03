@@ -60,6 +60,9 @@ STEP_GLOBAL_DATA_SCHEMA = vol.Schema(
         vol.Optional(CONF_AQI_SENSOR): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor"),
         ),
+        vol.Optional(CONF_PEAK_SCHEDULE): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="schedule"),
+        ),
     }
 )
 
@@ -131,9 +134,6 @@ STEP_ROOM_TARGETS_SCHEMA = vol.Schema(
             selector.NumberSelectorConfig(min=0, max=10, step=0.5, unit_of_measurement="°F"),
         ),
         vol.Optional(CONF_PREFER_AC_DURING_COMFORT, default=True): selector.BooleanSelector(),
-        vol.Optional(CONF_PEAK_SCHEDULE): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="schedule"),
-        ),
     }
 )
 
@@ -202,6 +202,7 @@ class SmartCoolingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_WEATHER_ENTITY: user_input.get(CONF_WEATHER_ENTITY),
                 CONF_OUTDOOR_TEMP_SENSOR: user_input.get(CONF_OUTDOOR_TEMP_SENSOR),
                 CONF_AQI_SENSOR: user_input.get(CONF_AQI_SENSOR),
+                CONF_PEAK_SCHEDULE: user_input.get(CONF_PEAK_SCHEDULE),
             }
             return await self.async_step_room()
 
@@ -416,12 +417,6 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
             CONF_PREFER_AC_DURING_COMFORT,
             default=current.get(CONF_PREFER_AC_DURING_COMFORT, True),
         )] = selector.BooleanSelector()
-        schema_dict[vol.Optional(
-            CONF_PEAK_SCHEDULE,
-            description={"suggested_value": current.get(CONF_PEAK_SCHEDULE)},
-        )] = selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="schedule"),
-        )
 
         return self.async_show_form(
             step_id="room_settings",
@@ -439,6 +434,7 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
                     CONF_WEATHER_ENTITY: user_input.get(CONF_WEATHER_ENTITY),
                     CONF_OUTDOOR_TEMP_SENSOR: user_input.get(CONF_OUTDOOR_TEMP_SENSOR),
                     CONF_AQI_SENSOR: user_input.get(CONF_AQI_SENSOR),
+                    CONF_PEAK_SCHEDULE: user_input.get(CONF_PEAK_SCHEDULE),
                 }
             return self.async_create_entry(title="", data=user_input)
 
@@ -468,6 +464,12 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
                     description={"suggested_value": current.get(CONF_AQI_SENSOR)},
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor"),
+                ),
+                vol.Optional(
+                    CONF_PEAK_SCHEDULE,
+                    description={"suggested_value": current.get(CONF_PEAK_SCHEDULE)},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="schedule"),
                 ),
             }
         )

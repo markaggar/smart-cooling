@@ -103,8 +103,19 @@ DEFAULT_COMFORT_TOLERANCE: Final = 2.0
 # e.g. for rooms that prefer quiet at night).  Forced False when ac_available=False.
 CONF_PREFER_AC_DURING_COMFORT: Final = "prefer_ac_during_comfort"
 
+# Deprecated - wind speed now comes from weather hourly forecast
+CONF_WIND_SPEED_SENSOR: Final = "wind_speed_sensor"
+CONF_CLOUD_COVERAGE_SENSOR: Final = "cloud_coverage_sensor"
+CONF_UV_INDEX_SENSOR: Final = "uv_index_sensor"
+
 # =============================================================================
-# PEAK ELECTRICITY SCHEDULE
+# GLOBAL DATA STORAGE
+# =============================================================================
+# Key for storing shared global config in hass.data[DOMAIN]
+GLOBAL_CONFIG_KEY: Final = "_global_config"
+
+# =============================================================================
+# GLOBAL CONFIGURATION (shared across all room instances)
 # =============================================================================
 # Optional HA schedule entity that marks peak (expensive) electricity hours.
 # When "on" = currently peak/expensive; when "off" = currently off-peak/cheap.
@@ -116,17 +127,6 @@ CONF_PREFER_AC_DURING_COMFORT: Final = "prefer_ac_during_comfort"
 #   - When currently in peak, check whether AC can be deferred until off-peak
 #     starts without missing the target time.
 CONF_PEAK_SCHEDULE: Final = "peak_schedule"
-
-# Deprecated - wind speed now comes from weather hourly forecast
-CONF_WIND_SPEED_SENSOR: Final = "wind_speed_sensor"
-CONF_CLOUD_COVERAGE_SENSOR: Final = "cloud_coverage_sensor"
-CONF_UV_INDEX_SENSOR: Final = "uv_index_sensor"
-
-# =============================================================================
-# GLOBAL DATA STORAGE
-# =============================================================================
-# Key for storing shared global config in hass.data[DOMAIN]
-GLOBAL_CONFIG_KEY: Final = "_global_config"
 
 # =============================================================================
 # PHYSICS PARAMETERS

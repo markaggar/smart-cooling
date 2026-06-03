@@ -111,7 +111,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if DOMAIN in self.hass.data and GLOBAL_CONFIG_KEY in self.hass.data[DOMAIN]:
             global_config = self.hass.data[DOMAIN][GLOBAL_CONFIG_KEY]
             # Global config takes precedence for shared sensors
-            for key in [CONF_WEATHER_ENTITY, CONF_OUTDOOR_TEMP_SENSOR, CONF_AQI_SENSOR]:
+            for key in [CONF_WEATHER_ENTITY, CONF_OUTDOOR_TEMP_SENSOR, CONF_AQI_SENSOR, CONF_PEAK_SCHEDULE]:
                 if global_config.get(key):
                     config[key] = global_config[key]
         
