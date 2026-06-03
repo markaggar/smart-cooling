@@ -111,7 +111,7 @@ class TestThermalModel:
         
         assert isinstance(prediction, TemperaturePrediction)
         # Temperature should rise with outdoor hotter than indoor
-        assert prediction.predicted_bedtime_temp >= 75.0
+        assert prediction.predicted_target_temp >= 75.0
         assert prediction.cooling_deficit > 0  # Above target
         assert len(prediction.hourly_predictions) == 5  # 0-4 hours
 
@@ -140,7 +140,7 @@ class TestThermalModel:
         )
         
         # Fan should result in lower temperature
-        assert with_fan.predicted_bedtime_temp < no_cooling.predicted_bedtime_temp
+        assert with_fan.predicted_target_temp < no_cooling.predicted_target_temp
 
     def test_predict_temperature_with_ac(self, model: ThermalModel):
         """Test temperature prediction with AC cooling."""
@@ -167,7 +167,7 @@ class TestThermalModel:
         
         # AC should cool relative to no cooling, even if not below starting temp
         # In extreme heat, AC slows heat gain but may not fully cool
-        assert with_ac.predicted_bedtime_temp < no_cooling.predicted_bedtime_temp
+        assert with_ac.predicted_target_temp < no_cooling.predicted_target_temp
 
     def test_prediction_to_dict(self, model: ThermalModel):
         """Test prediction serialization."""
@@ -185,10 +185,13 @@ class TestThermalModel:
         )
         
         result = prediction.to_dict()
-        assert "predicted_bedtime_temp" in result
+        assert "predicted_target_temp" in result
         assert "cooling_deficit" in result
         assert "hourly_predictions" in result
-        assert isinstance(result["predicted_bedtime_temp"], float)
+        assert isinstance(result["predicted_target_temp"], float)
+        # Legacy alias keys must still be present for backward compatibility
+        assert result["predicted_bedtime_temp"] == result["predicted_target_temp"]
+        assert result["uncooled_bedtime_temp"] == result["uncooled_target_temp"]
 
     # ------------------------------------------------------------------
     # Solar model: extended window and thermal lag
@@ -374,7 +377,7 @@ class TestThermalModel:
             with_tracked, hours_ahead=4.0, cooling_strategy=None
         )
         # Thermal lag adds stored heat → predicted temp with lag must be warmer
-        assert result_with_lag.predicted_bedtime_temp > result_no_lag.predicted_bedtime_temp
+        assert result_with_lag.predicted_target_temp > result_no_lag.predicted_target_temp
 
     def test_forecast_solar_wins_when_higher_than_tracked(self, model: ThermalModel):
         """During the daytime the forecast may predict a higher afternoon peak than
@@ -403,6 +406,94 @@ class TestThermalModel:
         )
         # Both must produce nearly the same result: max(0.81, 0.1)==0.81 ≈ max(0.81, 0)==0.81
         assert abs(
-            result_low_tracked.predicted_bedtime_temp
-            - result_forecast_only.predicted_bedtime_temp
+            result_low_tracked.predicted_target_temp
+            - result_forecast_only.predicted_target_temp
         ) < 0.5
+
+    def test_natural_cooling_rate_windy(self, model: ThermalModel):
+        """Natural cooling at >=3 mph wind must produce meaningfully more than the
+        old ~0.475°F/hr (NCE=0.15, no wind boost).  At 7.2 mph / 4.4°F diff /
+        50% RH the fixed model yields >=1.5°F/hr — full open window area at 7 mph
+        moves far more air than a small fan insert."""
+        # Conditions from the logged misprediction: 4.4°F diff, 7.2 mph wind
+        rate = model._compute_cooling_for_hour(
+            cooling_strategy="natural",
+            simulated_temp=73.4,
+            hour_outdoor_temp=69.0,
+            hour_humidity=50.0,
+            hour_wind=7.2,
+            hour_bearing=None,  # no alignment penalty
+            window_facing=[],
+        )
+        assert rate >= 1.5, f"Expected >=1.5°F/hr natural cooling at 7.2mph, got {rate:.3f}"
+        # Also verify it is at least 3× the pre-fix value (~0.475°F/hr)
+        old_rate_approx = 4.4 * 0.15 * 0.72 * 0.95  # old formula at same conditions
+        assert rate >= old_rate_approx * 3.0, (
+            f"New rate {rate:.3f} should be >=3× old rate {old_rate_approx:.3f}"
+        )
+
+    def test_natural_cooling_no_boost_when_calm(self, model: ThermalModel):
+        """Wind boost must NOT apply when wind < threshold (default 3 mph)."""
+        rate_calm = model._compute_cooling_for_hour(
+            cooling_strategy="natural",
+            simulated_temp=73.4,
+            hour_outdoor_temp=69.0,
+            hour_humidity=50.0,
+            hour_wind=1.0,  # calm
+            hour_bearing=None,
+            window_facing=[],
+        )
+        rate_windy = model._compute_cooling_for_hour(
+            cooling_strategy="natural",
+            simulated_temp=73.4,
+            hour_outdoor_temp=69.0,
+            hour_humidity=50.0,
+            hour_wind=7.2,  # windy
+            hour_bearing=None,
+            window_facing=[],
+        )
+        assert rate_windy > rate_calm * 1.3, "Windy rate should be significantly higher than calm"
+
+    def test_natural_cooling_zero_when_outdoor_warmer(self, model: ThermalModel):
+        """Natural cooling rate must be 0 when outdoor >= indoor."""
+        rate = model._compute_cooling_for_hour(
+            cooling_strategy="natural",
+            simulated_temp=72.0,
+            hour_outdoor_temp=75.0,
+            hour_humidity=50.0,
+            hour_wind=10.0,
+            hour_bearing=None,
+            window_facing=[],
+        )
+        assert rate == 0.0
+
+    def test_fan_cooling_additive_wind(self, model: ThermalModel):
+        """Fan rate with outdoor wind must exceed fan-only rate — window + fan combine."""
+        # Fan alone (wind=0): only fan_equivalent_wind_speed (2 mph) drives airflow
+        rate_no_wind = model._compute_cooling_for_hour(
+            cooling_strategy="fan",
+            simulated_temp=72.0,
+            hour_outdoor_temp=65.0,
+            hour_humidity=50.0,
+            hour_wind=0.0,
+            hour_bearing=None,
+            window_facing=[],
+        )
+        # Fan + 7 mph wind: outdoor wind adds on top (window must be open for fan to work)
+        rate_with_wind = model._compute_cooling_for_hour(
+            cooling_strategy="fan",
+            simulated_temp=72.0,
+            hour_outdoor_temp=65.0,
+            hour_humidity=50.0,
+            hour_wind=7.0,
+            hour_bearing=None,
+            window_facing=[],
+        )
+        assert rate_with_wind > rate_no_wind, (
+            f"Fan+wind rate ({rate_with_wind:.3f}) should exceed fan-only rate ({rate_no_wind:.3f})"
+        )
+        # At 7°F diff / 7 mph wind + 2 mph fan equivalent = 9 mph effective:
+        # rate_with_wind uses wind_factor=0.9 vs 0.2 at no-wind → 4.5× more, easily >1.5×
+        assert rate_with_wind >= rate_no_wind * 1.5, (
+            "7 mph wind should boost fan cooling by at least 50%"
+        )

@@ -1,8 +1,17 @@
 """Constants for Smart Cooling integration."""
+import json
+from pathlib import Path
 from typing import Final
 
 DOMAIN: Final = "smart_cooling"
 MANUFACTURER: Final = "markaggar"
+
+try:
+    _manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
+except (FileNotFoundError, OSError, json.JSONDecodeError):
+    _manifest = {}
+MODEL: Final[str] = _manifest.get("name", "Smart Cooling")
+SW_VERSION: Final[str] = _manifest.get("version", "0.0.0")
 
 # =============================================================================
 # GLOBAL CONFIGURATION (shared across all room instances)
@@ -94,6 +103,20 @@ DEFAULT_COMFORT_TOLERANCE: Final = 2.0
 # e.g. for rooms that prefer quiet at night).  Forced False when ac_available=False.
 CONF_PREFER_AC_DURING_COMFORT: Final = "prefer_ac_during_comfort"
 
+# =============================================================================
+# PEAK ELECTRICITY SCHEDULE
+# =============================================================================
+# Optional HA schedule entity that marks peak (expensive) electricity hours.
+# When "on" = currently peak/expensive; when "off" = currently off-peak/cheap.
+# Peak hours are typically fewer and easier to specify (e.g. 3 pm – 9 pm).
+# Examples: utility time-of-use peak window, solar export-limited midday block.
+# The integration uses this to:
+#   - Recommend pre-cooling to a lower temperature before peak starts so the
+#     room can coast through peak hours without AC.
+#   - When currently in peak, check whether AC can be deferred until off-peak
+#     starts without missing the target time.
+CONF_PEAK_SCHEDULE: Final = "peak_schedule"
+
 # Deprecated - wind speed now comes from weather hourly forecast
 CONF_WIND_SPEED_SENSOR: Final = "wind_speed_sensor"
 CONF_CLOUD_COVERAGE_SENSOR: Final = "cloud_coverage_sensor"
@@ -114,9 +137,16 @@ DEFAULT_PHYSICS_PARAMS: Final = {
     "solar_gain_factor": 0.6,  # multiplier for solar heat
     "ac_cooling_rate_mild": 4.5,  # °F/hr when outdoor < 82°F
     "ac_cooling_rate_hot": 2.5,  # °F/hr when outdoor >= 82°F
-    "natural_cooling_effectiveness": 0.15,  # natural ventilation coefficient
+    "natural_cooling_effectiveness": 0.25,  # natural ventilation coefficient
     "fan_cooling_effectiveness": 0.30,  # fan ventilation coefficient (~2-3°F/hr at 10°F diff)
-    "fan_equivalent_wind_speed": 8.0,  # mph equivalent wind from fan
+    "fan_equivalent_wind_speed": 2.0,  # mph equivalent wind the fan alone contributes through
+                                        # a full window opening — small fan blade area vs full
+                                        # window area means real wind dominates at >3-4 mph
+    "natural_wind_boost_threshold": 3.0,  # mph above which full-window natural ventilation
+                                            # gets a boost (lower than fan threshold because
+                                            # the entire window area drives air exchange)
+    "natural_wind_boost_factor": 2.5,  # multiplier at threshold — full open window at
+                                        # 7 mph moves ~3-4× more air than a small fan insert
     "fan_boost_factor": 1.4,  # multiplier when fan + wind
     "thermal_transfer_coefficient": 0.1,  # heat transfer through walls
     "thermal_lag_factor": 0.5,  # wall/attic re-radiation after sunny afternoons (learnable)

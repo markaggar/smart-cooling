@@ -43,7 +43,8 @@
                     "learning_enabled": "Enable learning from predictions",
                     "comfort_end_entity": "Comfort window end time (input_datetime) - wake time / end of overnight comfort period (optional)",
                     "comfort_tolerance": "Comfort tolerance (°F) - how far above target is still acceptable during the comfort window",
-                    "prefer_ac_during_comfort": "Prefer AC during comfort window - run AC overnight to maintain comfort (disable for quiet bedrooms or rooms without AC)"
+                    "prefer_ac_during_comfort": "Prefer AC during comfort window - run AC overnight to maintain comfort (disable for quiet bedrooms or rooms without AC)",
+                    "peak_schedule": "Peak electricity schedule (optional) - schedule entity where 'on' = peak/expensive hours (e.g. 3 PM–9 PM). AC will be deferred to off-peak when time permits."
                 }
             }
         },
@@ -79,7 +80,8 @@
                     "learning_enabled": "Enable learning",
                     "comfort_end_entity": "Comfort window end time (wake time, optional)",
                     "comfort_tolerance": "Comfort tolerance (°F above target)",
-                    "prefer_ac_during_comfort": "Prefer AC during comfort window"
+                    "prefer_ac_during_comfort": "Prefer AC during comfort window",
+                    "peak_schedule": "Peak electricity schedule (optional)"
                 }
             },
             "global_settings": {
@@ -94,6 +96,14 @@
         }
     },
     "entity": {
+        "binary_sensor": {
+            "ac_needed": {
+                "name": "AC Needed"
+            },
+            "action_needed_now": {
+                "name": "Action Needed Now"
+            }
+        },
         "sensor": {
             "recommended_strategy": {
                 "state": {

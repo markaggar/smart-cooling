@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .const import DEFAULT_PHYSICS_PARAMS, WINDOW_DIRECTION_DEGREES
@@ -41,25 +41,29 @@ def wind_alignment_factor(
             best = alignment
     return best if best > 0.0 else 0.0
 
-_LOGGER = logging.getLogger(__name__)
-
 
 @dataclass
 class TemperaturePrediction:
     """Prediction result from thermal model."""
     
-    predicted_bedtime_temp: float
+    predicted_target_temp: float
     cooling_deficit: float  # How many degrees above target
     hourly_predictions: list[dict[str, Any]] = field(default_factory=list)
-    uncooled_bedtime_temp: float = 0.0  # What temp would be without intervention
+    uncooled_target_temp: float = 0.0  # What temp would be without intervention
     
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for HA state attributes."""
+        predicted = round(self.predicted_target_temp, 1)
+        uncooled = round(self.uncooled_target_temp, 1)
         return {
-            "predicted_bedtime_temp": round(self.predicted_bedtime_temp, 1),
+            "predicted_target_temp": predicted,
             "cooling_deficit": round(self.cooling_deficit, 1),
-            "uncooled_bedtime_temp": round(self.uncooled_bedtime_temp, 1),
+            "uncooled_target_temp": uncooled,
             "hourly_predictions": self.hourly_predictions,
+            # Legacy aliases — kept for backward compatibility with existing
+            # automations and dashboards; will be removed in a future version.
+            "predicted_bedtime_temp": predicted,
+            "uncooled_bedtime_temp": uncooled,
         }
 
 
@@ -179,8 +183,10 @@ class ThermalModel:
         else:
             effectiveness_multiplier = 0.0
 
-        # Wind boost
-        effective_wind = max(wind_speed, self.params["fan_equivalent_wind_speed"])
+        # Fan creates its own forced airflow; outdoor wind through the open window adds on
+        # top of that — a window must always be open for the fan to cool, so the two
+        # airflows combine rather than the larger simply overriding the smaller.
+        effective_wind = self.params["fan_equivalent_wind_speed"] + wind_speed
         wind_factor = effective_wind / 10.0  # Normalize to ~1 at 10 mph
 
         # Humidity penalty: high outdoor humidity reduces convective cooling.
@@ -205,6 +211,51 @@ class ThermalModel:
         if outdoor_temp >= 82:
             return self.params["ac_cooling_rate_hot"]
         return self.params["ac_cooling_rate_mild"]
+
+    def _compute_cooling_for_hour(
+        self,
+        cooling_strategy: str | None,
+        simulated_temp: float,
+        hour_outdoor_temp: float,
+        hour_humidity: float,
+        hour_wind: float,
+        hour_bearing: float | None,
+        window_facing: list[str],
+    ) -> float:
+        """Return the cooling rate (°F/hr) for one simulation step."""
+        if cooling_strategy == "fan":
+            alignment = wind_alignment_factor(hour_bearing, window_facing)
+            return self.calculate_fan_cooling_rate(
+                hour_outdoor_temp, simulated_temp,
+                wind_speed=hour_wind * alignment,
+                outdoor_humidity=hour_humidity,
+            )
+        if cooling_strategy == "ac":
+            return self.calculate_ac_cooling_rate(hour_outdoor_temp)
+        if cooling_strategy == "natural":
+            temp_diff = simulated_temp - hour_outdoor_temp
+            if temp_diff > 0:
+                alignment = wind_alignment_factor(hour_bearing, window_facing)
+                effective_wind = hour_wind * alignment
+                # Floor of 0.3 so truly still air gives near-zero ventilation
+                wind_factor = max(effective_wind, 0.3) / 10.0
+                # Wind boost: at >= threshold mph, ventilation approaches fan-equivalent.
+                # Scaled linearly above threshold, capped at 2× boost.
+                threshold = self.params.get("natural_wind_boost_threshold", 5.0)
+                boost = self.params.get("natural_wind_boost_factor", 1.5)
+                if effective_wind >= threshold:
+                    wind_boost = 1.0 + (boost - 1.0) * min((effective_wind - threshold) / threshold, 1.0)
+                else:
+                    wind_boost = 1.0
+                humidity_factor = max(0.5, 1.0 - max(hour_humidity - 40.0, 0.0) * 0.005)
+                return (
+                    temp_diff
+                    * self.params["natural_cooling_effectiveness"]
+                    * wind_factor
+                    * wind_boost
+                    * humidity_factor
+                )
+        return 0.0
 
     def predict_temperature(
         self,
@@ -261,44 +312,15 @@ class ThermalModel:
                 uv_index=uv_index,
                 afternoon_solar_load=peak_afternoon_solar,
             )
-            cooling = 0.0
-            hour_humidity = forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0))
-            if cooling_strategy == "fan":
-                hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 0.0))
-                hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
-                window_facing = current_conditions.get("window_facing", [])
-                alignment = wind_alignment_factor(hour_bearing, window_facing)
-                cooling = self.calculate_fan_cooling_rate(
-                    hour_outdoor_temp, simulated_temp,
-                    wind_speed=float(hour_wind) * alignment,
-                    outdoor_humidity=float(hour_humidity),
-                )
-            elif cooling_strategy == "ac":
-                # When simulating the AC recommendation the user will lower the
-                # thermostat setpoint to reach the target, so the *current*
-                # setpoint does not constrain cooling here.
-                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
-            elif cooling_strategy == "natural":
-                # Natural ventilation (open window, no fan) — driven by
-                # temperature differential and wind, but less effective than a fan
-                temp_diff = simulated_temp - hour_outdoor_temp
-                if temp_diff > 0:
-                    hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
-                    hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
-                    window_facing = current_conditions.get("window_facing", [])
-                    alignment = wind_alignment_factor(hour_bearing, window_facing)
-                    # Floor of 0.3 (not 1.0) so truly still air gives near-zero
-                    # ventilation — aligns with real experience that open windows
-                    # don't cool much without wind.
-                    wind_factor = max(float(hour_wind) * alignment, 0.3) / 10.0
-                    # Same humidity penalty as fan cooling
-                    humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
-                    cooling = (
-                        temp_diff
-                        * self.params["natural_cooling_effectiveness"]
-                        * wind_factor
-                        * humidity_factor
-                    )
+            hour_humidity = float(forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0)))
+            _wind_fallback = current_conditions.get("wind_speed", 3.0 if cooling_strategy == "natural" else 0.0)
+            hour_wind = float(forecast_data.get("wind_speed", _wind_fallback))
+            hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
+            window_facing = current_conditions.get("window_facing", [])
+            cooling = self._compute_cooling_for_hour(
+                cooling_strategy, simulated_temp, hour_outdoor_temp,
+                hour_humidity, hour_wind, hour_bearing, window_facing,
+            )
             
             # Net temperature change
             net_change = heat_gain - cooling
@@ -326,8 +348,8 @@ class ThermalModel:
             })
         
         # Final prediction is the last hour
-        predicted_bedtime_temp = simulated_temp
-        cooling_deficit = predicted_bedtime_temp - target_temp
+        predicted_target_temp = simulated_temp
+        cooling_deficit = predicted_target_temp - target_temp
         
         # Also calculate uncooled scenario
         uncooled_prediction = self.predict_temperature(
@@ -337,13 +359,13 @@ class ThermalModel:
         ) if cooling_strategy else None
         
         return TemperaturePrediction(
-            predicted_bedtime_temp=predicted_bedtime_temp,
+            predicted_target_temp=predicted_target_temp,
             cooling_deficit=cooling_deficit,
             hourly_predictions=hourly_predictions,
-            uncooled_bedtime_temp=(
-                uncooled_prediction.predicted_bedtime_temp 
-                if uncooled_prediction 
-                else predicted_bedtime_temp
+            uncooled_target_temp=(
+                uncooled_prediction.predicted_target_temp
+                if uncooled_prediction
+                else predicted_target_temp
             ),
         )
 
@@ -397,35 +419,15 @@ class ThermalModel:
                 afternoon_solar_load=peak_afternoon_solar,
             )
 
-            cooling = 0.0
-            hour_humidity = forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0))
-            if cooling_strategy == "fan":
-                hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 0.0))
-                hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
-                window_facing = current_conditions.get("window_facing", [])
-                alignment = wind_alignment_factor(hour_bearing, window_facing)
-                cooling = self.calculate_fan_cooling_rate(
-                    hour_outdoor_temp, simulated_temp,
-                    wind_speed=float(hour_wind) * alignment,
-                    outdoor_humidity=float(hour_humidity),
-                )
-            elif cooling_strategy == "ac":
-                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
-            elif cooling_strategy == "natural":
-                temp_diff = simulated_temp - hour_outdoor_temp
-                if temp_diff > 0:
-                    hour_wind = forecast_data.get("wind_speed", current_conditions.get("wind_speed", 3.0))
-                    hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
-                    window_facing = current_conditions.get("window_facing", [])
-                    alignment = wind_alignment_factor(hour_bearing, window_facing)
-                    wind_factor = max(float(hour_wind) * alignment, 0.3) / 10.0
-                    humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
-                    cooling = (
-                        temp_diff
-                        * self.params["natural_cooling_effectiveness"]
-                        * wind_factor
-                        * humidity_factor
-                    )
+            hour_humidity = float(forecast_data.get("humidity", current_conditions.get("outdoor_humidity", 50.0)))
+            _wind_fallback = current_conditions.get("wind_speed", 3.0 if cooling_strategy == "natural" else 0.0)
+            hour_wind = float(forecast_data.get("wind_speed", _wind_fallback))
+            hour_bearing = forecast_data.get("wind_bearing", current_conditions.get("wind_bearing"))
+            window_facing = current_conditions.get("window_facing", [])
+            cooling = self._compute_cooling_for_hour(
+                cooling_strategy, simulated_temp, hour_outdoor_temp,
+                hour_humidity, hour_wind, hour_bearing, window_facing,
+            )
 
             # Apply fractional step (rates are per-hour; step is 0.25h)
             net_change = heat_gain - cooling
@@ -494,7 +496,6 @@ class ThermalModel:
             hour_outdoor_temp = forecast_data.get("temperature", outdoor_temp_default)
             cloud_coverage = forecast_data.get("cloud_coverage", 50.0)
             uv_index = forecast_data.get("uv_index", 0.0)
-            hour_humidity = forecast_data.get("humidity", outdoor_humidity_default)
 
             heat_gain = self.calculate_heat_gain(
                 hour=hour,
@@ -505,32 +506,13 @@ class ThermalModel:
                 afternoon_solar_load=peak_afternoon_solar,
             )
 
-            cooling = 0.0
-            if cooling_strategy == "fan":
-                hour_wind = forecast_data.get("wind_speed", wind_speed_default)
-                hour_bearing = forecast_data.get("wind_bearing", wind_bearing_default)
-                alignment = wind_alignment_factor(hour_bearing, window_facing)
-                cooling = self.calculate_fan_cooling_rate(
-                    hour_outdoor_temp, simulated_temp,
-                    wind_speed=float(hour_wind) * alignment,
-                    outdoor_humidity=float(hour_humidity),
-                )
-            elif cooling_strategy == "ac":
-                cooling = self.calculate_ac_cooling_rate(hour_outdoor_temp)
-            elif cooling_strategy == "natural":
-                temp_diff = simulated_temp - hour_outdoor_temp
-                if temp_diff > 0:
-                    hour_wind = forecast_data.get("wind_speed", wind_speed_default)
-                    hour_bearing = forecast_data.get("wind_bearing", wind_bearing_default)
-                    alignment = wind_alignment_factor(hour_bearing, window_facing)
-                    wind_factor = max(float(hour_wind) * alignment, 0.3) / 10.0
-                    humidity_factor = max(0.5, 1.0 - max(float(hour_humidity) - 40.0, 0.0) * 0.005)
-                    cooling = (
-                        temp_diff
-                        * self.params["natural_cooling_effectiveness"]
-                        * wind_factor
-                        * humidity_factor
-                    )
+            hour_wind = float(forecast_data.get("wind_speed", wind_speed_default))
+            hour_bearing = forecast_data.get("wind_bearing", wind_bearing_default)
+            hour_humidity = float(forecast_data.get("humidity", outdoor_humidity_default))
+            cooling = self._compute_cooling_for_hour(
+                cooling_strategy, simulated_temp, hour_outdoor_temp,
+                hour_humidity, hour_wind, hour_bearing, window_facing,
+            )
 
             net_change = heat_gain - cooling
             simulated_temp += net_change
@@ -576,8 +558,6 @@ class ThermalModel:
         if not forecast:
             return 0.0
 
-        from datetime import timezone as _tz
-
         peak_solar = 0.0
         for entry in forecast:
             entry_time = entry.get("datetime")
@@ -592,7 +572,7 @@ class ThermalModel:
                     continue
                 # Normalise to naive local for hour comparison
                 if entry_dt.tzinfo is not None:
-                    entry_dt = entry_dt.astimezone(_tz.utc).replace(tzinfo=None)
+                    entry_dt = entry_dt.astimezone(timezone.utc).replace(tzinfo=None)
             except (ValueError, AttributeError, OverflowError):
                 continue
 

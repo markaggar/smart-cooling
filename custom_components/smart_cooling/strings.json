@@ -36,12 +36,26 @@
                     "target_temp_entity": "Target temperature helper (input_number)",
                     "target_time_entity": "Target time helper (input_datetime) - when to reach target",
                     "tolerance_minutes": "Tolerance past target time (minutes) - prefer fan/window over AC if within this window",
-                    "learning_enabled": "Enable learning from predictions"
+                    "learning_enabled": "Enable learning from predictions",
+                    "comfort_end_entity": "Comfort window end time (input_datetime) - wake time / end of overnight comfort period (optional)",
+                    "comfort_tolerance": "Comfort tolerance (\u00b0F) - how far above target is still acceptable during the comfort window",
+                    "prefer_ac_during_comfort": "Prefer AC during comfort window - run AC overnight to maintain comfort (disable for quiet bedrooms or rooms without AC)",
+                    "peak_schedule": "Peak electricity schedule (optional) - schedule entity where 'on' = peak/expensive hours (e.g. 3 PM\u20139 PM). AC will be deferred to off-peak when time permits."
                 }
             }
         },
         "error": {
             "room_already_configured": "A room with this name is already configured"
+        }
+    },
+    "entity": {
+        "binary_sensor": {
+            "ac_needed": {
+                "name": "AC Needed"
+            },
+            "action_needed_now": {
+                "name": "Action Needed Now"
+            }
         }
     },
     "options": {

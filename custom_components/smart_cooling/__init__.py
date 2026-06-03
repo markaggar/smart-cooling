@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 SERVICE_CALIBRATE = "calibrate"
 SERVICE_CALIBRATE_SCHEMA = vol.Schema(
@@ -116,6 +116,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update - reload the entry."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate config entry to a newer schema version.
+
+    Currently at VERSION = 1 — no migration needed yet.
+    Extend this function when bumping SmartCoolingConfigFlow.VERSION.
+    """
+    _LOGGER.debug(
+        "Migrating smart_cooling entry %s from version %s",
+        entry.entry_id,
+        entry.version,
+    )
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

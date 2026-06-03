@@ -18,6 +18,9 @@ A Home Assistant custom integration that predicts whether your room will reach a
 - **AC setpoint awareness** — optional thermostat setpoint entity prevents the model from predicting AC cooling past the temperature the AC will actually stop at
 - **Close-window wind context** — when recommending to close a window, the reasoning now explains whether calm walls, light breeze, or active wind is driving the predicted cool-down
 - **Forecast bias correction** — actual outdoor sensor reading is used to anchor the near-term forecast. Any gap between the sensor and the forecast's current-hour temperature is applied to the first several forecast hours with exponential decay, fading to zero by ~6 hours out
+- **Wind-aware reasoning** — when natural ventilation or a fan is recommended, the reasoning notes the current wind speed and compass direction (e.g. *"7 mph S wind — good ventilation"*) and suggests opening a second window for cross-ventilation when wind is meaningful
+- **Rain detection** — reads the hourly forecast's `condition` and `precipitation` fields; warns when rain is arriving within 3 hours and recommends closing wind-facing windows immediately if it's already raining with aligned wind
+- **Peak electricity scheduling** — optional `schedule.*` entity marks your peak (expensive) electricity hours; AC is automatically deferred to off-peak when time permits, and the `AC Needed` binary sensor only fires when AC is genuinely required right now
 
 ---
 
@@ -82,6 +85,7 @@ These tell the integration what is currently running so recommendations say "kee
 | Comfort window end entity | — | — | `input_datetime` helper for when comfort must end (e.g., wake time). When set, activates the overnight comfort window; see [Comfort Window](#comfort-window) |
 | Comfort tolerance | 2.0 | °F | How far above target is still acceptable during the overnight window |
 | Prefer AC during comfort window | On | — | When on, biases toward AC to maintain overnight comfort. Turn off for rooms that prefer quiet at night. |
+| Peak electricity schedule | — | — | `schedule.*` entity where `on` = peak/expensive hours (e.g. 3 PM–9 PM). AC is deferred to off-peak when time permits. See [Peak Electricity Scheduling](#peak-electricity-scheduling). |
 
 All options except room name are editable after setup via **Settings → Devices & Services → Smart Cooling → Configure**.
 
@@ -360,7 +364,37 @@ When closing a window due to over-cooling, the reasoning now includes:
 - The predicted temperature at the deadline with the window left open
 - A wind context note: calm (< 2 mph), light (2–5 mph), or strong (> 5 mph) — so you can judge whether it is ongoing air exchange or just cold walls driving the prediction
 
-The close-window check runs before strategy selection, so it takes priority over any cooling recommendation.
+#### Rain close-window trigger
+
+If it is currently raining **and** the wind speed is ≥ 3 mph **and** the wind is blowing into a configured window-facing direction, the window close recommendation fires immediately — before any outdoor-temperature check. The reasoning specifies the compass direction the rain is coming from and suggests an alternative:
+
+> *"Close window: it is raining with 8 mph wind from the S. Rain may be blowing into a south-facing window. Switch to a fan in a non-S-facing window, or use AC if cooling is still needed."*
+
+If no window-facing directions are configured, the rain trigger still fires on any rain + wind ≥ 3 mph combination (no directional filtering).
+
+Upcoming rain within the next 3 hours is also noted in the reasoning for passive strategies, giving you time to prepare:
+
+> *"Rain expected in about 2 hours — plan to close wind-facing windows before it arrives."*
+
+The rain detection reads the forecast `condition` string (e.g. `rainy`, `pouring`, `lightning-rainy`) and the `precipitation` field (> 0.1 mm). Lightning alone (without precipitation) triggers the upcoming-rain warning but not the immediate close-window recommendation.
+
+### Wind-Aware Reasoning
+
+When natural ventilation or a fan is the recommended strategy, the reasoning section now includes a wind context note drawn from the forecast:
+
+| Wind speed | Note style |
+|---|---|
+| < 3 mph | No wind note (wind has minimal effect) |
+| 3–8 mph | *"Light/moderate X mph S wind — good ventilation"* |
+| > 8 mph | *"Strong X mph S wind — excellent ventilation"* |
+
+The compass direction (N, NE, E, SE, S, SW, W, NW) is extracted from the forecast's `wind_bearing`. If `wind_bearing` is absent, only the speed is shown.
+
+For meaningful wind (≥ 3 mph), the reasoning also adds a **cross-ventilation hint**:
+
+> *"For best results open a second window or door on the opposite side of the room so warm air has somewhere to escape."*
+
+When AC is rejected in favour of a passive strategy, the reasoning notes the wind speed that was evaluated so you can see exactly why passive was preferred over AC.
 
 ### Tolerance
 
@@ -532,6 +566,89 @@ Update to the latest version — fixed so `action_needed_by` returns `Unknown` w
 
 ### `will_reach_target_at` ticks to "now" every minute
 Update to the latest version — fixed so it returns `Unknown` when the room is already at or below target.
+
+---
+
+## Peak Electricity Scheduling
+
+Configure a `schedule.*` entity in HA that marks your **peak (expensive) electricity hours** — e.g. your utility's time-of-use peak window or the hours when you're exporting solar. The convention is:
+
+- `on` = currently peak (expensive)
+- `off` = currently off-peak (cheap or solar)
+
+This is easier to configure than an off-peak schedule because peak windows are typically shorter (e.g. 3 PM–9 PM) and fewer.
+
+### How It Works
+
+The integration reads the schedule entity's `state` and `next_event` attribute (the ISO datetime of the next state transition) each coordinator cycle. The timing information flows into `current_conditions` as:
+
+| Key | Value |
+|---|---|
+| `peak_now` | `true` / `false` / `null` (null = no schedule configured) |
+| `peak_ends_in_hours` | Hours until this peak window ends (set when `peak_now=true`) |
+| `peak_starts_in_hours` | Hours until next peak window starts (set when `peak_now=false`) |
+
+The strategy engine evaluates these whenever AC is the recommended method:
+
+#### Currently off-peak, peak starting within 6 hours
+
+AC is recommended as normal (rates are cheap now), but the reasoning adds:
+
+> *"Peak electricity hours start at 3:00 PM — good time to run AC now and pre-cool while rates are low."
+
+This nudges you to pre-cool the room before rates rise, so it can coast through peak hours without AC.
+
+#### Currently peak, peak ends before target time
+
+The engine simulates natural room drift through the remainder of peak, then checks whether AC can still reach the target temperature in the remaining off-peak window. Two outcomes:
+
+**Deferral is viable** — there's enough off-peak time left:
+
+- Method changes to **`NO_ACTION`** → `AC Needed` binary sensor stays **`OFF`**
+- Timing shows *"defer AC until 9:00 PM"*
+- Reasoning explains: *"Peak electricity hours end at 9:00 PM — AC deferred to off-peak (room will be ~80°F by then; AC can reach 72°F in ~1h 15m from that point)"*
+- `ac_deferred_peak` attribute on the `AC Needed` sensor is set to `true`
+
+**Deferral not viable** — peak runs too close to the target deadline:
+
+- Method stays **`START_AC`** / **`CONTINUE_AC`** → `AC Needed` binary sensor fires **`ON`** as normal
+- Reasoning explains: *"Peak electricity hours end at 9:00 PM — AC must start now; waiting for off-peak would not leave enough time (room would be ~82°F by then)"*
+
+#### Currently peak, peak ends after target time
+
+Off-peak doesn't arrive before the deadline — AC must run now regardless of rate:
+
+> *"Currently in peak electricity hours until 9:00 PM — AC must run now to meet target on time"
+
+### Automations
+
+The `AC Needed` binary sensor (`binary_sensor.smart_cooling_{room}_ac_needed`) works correctly with no automation changes — it simply won't fire during deferrable peak hours. If you want to distinguish between *"no AC needed at all"* and *"AC needed but deferred for cost"*, check the `ac_deferred_peak` attribute:
+
+```yaml
+# Example: notify when AC is being deferred to off-peak
+trigger:
+  - platform: state
+    entity_id: binary_sensor.smart_cooling_bedroom_ac_needed
+    attribute: ac_deferred_peak
+    to: true
+action:
+  - service: notify.mobile_app
+    data:
+      message: "AC deferred to off-peak — room will pre-cool naturally until rates drop."
+```
+
+```yaml
+# Example: only turn on AC when needed AND it's not a deferral situation
+trigger:
+  - platform: template
+    value_template: >
+      {{ is_state('binary_sensor.smart_cooling_bedroom_ac_needed', 'on')
+         and not state_attr('binary_sensor.smart_cooling_bedroom_ac_needed', 'ac_deferred_peak') }}
+action:
+  - service: climate.turn_on
+    target:
+      entity_id: climate.bedroom
+```
 
 ---
 
