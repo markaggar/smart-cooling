@@ -39,6 +39,7 @@ from .const import (
     CONF_COMFORT_TOLERANCE,
     DEFAULT_COMFORT_TOLERANCE,
     CONF_PREFER_AC_DURING_COMFORT,
+    CONF_PEAK_SCHEDULE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -130,6 +131,9 @@ STEP_ROOM_TARGETS_SCHEMA = vol.Schema(
             selector.NumberSelectorConfig(min=0, max=10, step=0.5, unit_of_measurement="°F"),
         ),
         vol.Optional(CONF_PREFER_AC_DURING_COMFORT, default=True): selector.BooleanSelector(),
+        vol.Optional(CONF_PEAK_SCHEDULE): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="schedule"),
+        ),
     }
 )
 
@@ -412,6 +416,12 @@ class SmartCoolingOptionsFlow(config_entries.OptionsFlow):
             CONF_PREFER_AC_DURING_COMFORT,
             default=current.get(CONF_PREFER_AC_DURING_COMFORT, True),
         )] = selector.BooleanSelector()
+        schema_dict[vol.Optional(
+            CONF_PEAK_SCHEDULE,
+            description={"suggested_value": current.get(CONF_PEAK_SCHEDULE)},
+        )] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="schedule"),
+        )
 
         return self.async_show_form(
             step_id="room_settings",

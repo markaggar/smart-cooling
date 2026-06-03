@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -39,6 +39,7 @@ from .const import (
     CONF_COMFORT_TOLERANCE,
     DEFAULT_COMFORT_TOLERANCE,
     CONF_PREFER_AC_DURING_COMFORT,
+    CONF_PEAK_SCHEDULE,
 )
 from .thermal_model import ThermalModel
 from .strategy_engine import StrategyEngine
@@ -82,6 +83,13 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # We cache the observed value here so it survives into the evening.
         self._peak_afternoon_solar_today: float = 0.0
         self._peak_solar_date: date | None = None
+
+        # Stable recommendation tracking: suppress churn from minor forecast
+        # oscillations by only replacing the current recommendation when the
+        # method changes OR the timing shift is large enough to matter at the
+        # current horizon.
+        self._stable_strategy: Any = None
+        self._stable_action_needed_by: datetime | None = None
 
     async def async_initialize(self) -> None:
         """Load persisted learning state and apply learned parameters.
@@ -305,12 +313,102 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (ValueError, TypeError):
             return None
 
+    # HA weather condition strings that indicate active precipitation.
+    _RAIN_CONDITIONS: frozenset[str] = frozenset({
+        "rainy", "pouring", "lightning-rainy",
+        "snowy-rainy",       # wet snow / sleet
+        "hail",
+    })
+    # Conditions that mean rain is imminent (within the next few hours).
+    _RAIN_IMMINENT_CONDITIONS: frozenset[str] = _RAIN_CONDITIONS | frozenset({
+        "lightning",         # thunderstorm often brings rain
+    })
+
+    def _is_raining_now(self, forecast: list[dict[str, Any]]) -> bool:
+        """Return True when the current-hour forecast condition indicates rain."""
+        if not forecast:
+            return False
+        condition = str(forecast[0].get("condition", "")).lower()
+        precipitation = forecast[0].get("precipitation", 0.0)
+        try:
+            precip_mm = float(precipitation)
+        except (TypeError, ValueError):
+            precip_mm = 0.0
+        return condition in self._RAIN_CONDITIONS or precip_mm > 0.1
+
+    def _rain_arriving_hours(
+        self, forecast: list[dict[str, Any]], look_ahead: int = 3
+    ) -> float | None:
+        """Return hours until rain arrives (0 = raining now), or None if no rain forecast.
+
+        Checks the next ``look_ahead`` hourly entries (default 3).  Returns the
+        offset of the first rainy entry so the caller can say "rain in ~2 h".
+        """
+        for i, entry in enumerate(forecast[:look_ahead]):
+            condition = str(entry.get("condition", "")).lower()
+            try:
+                precip_mm = float(entry.get("precipitation", 0.0))
+            except (TypeError, ValueError):
+                precip_mm = 0.0
+            if condition in self._RAIN_IMMINENT_CONDITIONS or precip_mm > 0.1:
+                return float(i)
+        return None
+
     def _sensor_ready(self, entity_id: str | None) -> bool:
         """Return True if the entity exists and has a real (non-startup) value."""
         if not entity_id:
             return False
         state = self.hass.states.get(entity_id)
         return state is not None and state.state not in ("unknown", "unavailable")
+
+    def _get_peak_status(self, now: datetime) -> dict[str, Any]:
+        """Read the peak-hours schedule entity and return timing details.
+
+        The schedule entity uses the convention: on = currently peak (expensive),
+        off = currently off-peak (cheap / solar).
+
+        Returns a dict with:
+          peak_now              – True = currently peak, False = currently off-peak,
+                                  None = no schedule configured or unavailable
+          peak_ends_in_hours    – hours until peak ends   (only when peak_now=True)
+          peak_starts_in_hours  – hours until peak starts (only when peak_now=False)
+        """
+        entity_id = self.config.get(CONF_PEAK_SCHEDULE)
+        if not entity_id:
+            return {"peak_now": None, "peak_ends_in_hours": None, "peak_starts_in_hours": None}
+
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable"):
+            return {"peak_now": None, "peak_ends_in_hours": None, "peak_starts_in_hours": None}
+
+        peak_now = state.state == "on"
+
+        # next_event is the ISO datetime of the next state change
+        next_event_str = state.attributes.get("next_event")
+        hours_to_next: float | None = None
+        if next_event_str:
+            try:
+                next_event = datetime.fromisoformat(str(next_event_str))
+                if next_event.tzinfo is None:
+                    next_event = next_event.replace(tzinfo=timezone.utc)
+                now_aware = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+                delta = (next_event - now_aware).total_seconds() / 3600.0
+                hours_to_next = max(0.0, delta)
+            except (ValueError, OverflowError, AttributeError):
+                pass
+
+        if peak_now:
+            return {
+                "peak_now": True,
+                "peak_ends_in_hours": hours_to_next,   # when this peak window ends
+                "peak_starts_in_hours": None,
+            }
+        else:
+            return {
+                "peak_now": False,
+                "peak_ends_in_hours": None,
+                "peak_starts_in_hours": hours_to_next,  # when next peak window begins
+            }
 
     @staticmethod
     def _extract_peak(
@@ -347,6 +445,118 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             second=0,
             microsecond=0,
         )
+
+    @staticmethod
+    def _coarsen_time(dt: datetime, hours_away: float) -> datetime:
+        """Round a datetime to a resolution appropriate for how far away it is.
+
+        Far-out actions don't need minute-level precision; coarser buckets
+        prevent tiny forecast oscillations from changing the displayed time.
+          > 4 h away  → nearest 30 min
+          2–4 h away  → nearest 15 min
+          ≤ 2 h away  → nearest  5 min (same as _round_to_5min)
+        """
+        if hours_away > 4.0:
+            bucket_minutes = 30
+        elif hours_away > 2.0:
+            bucket_minutes = 15
+        else:
+            bucket_minutes = 5
+        bucket_seconds = bucket_minutes * 60
+        total_seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
+        rounded_seconds = round(total_seconds / bucket_seconds) * bucket_seconds
+        return dt.replace(
+            hour=rounded_seconds // 3600 % 24,
+            minute=(rounded_seconds % 3600) // 60,
+            second=0,
+            microsecond=0,
+        )
+
+    def _stable_rec_threshold_minutes(self, hours_away: float) -> int:
+        """Return the minimum timing shift (minutes) required to adopt a new
+        recommendation when the cooling method hasn't changed.
+
+        Matches the coarsening resolution so a recommendation only updates when
+        it would actually display a different time to the user.
+          > 4 h away  → 30 min  (half of a 30-min bucket)
+          2–4 h away  → 15 min
+          ≤ 2 h away  →  5 min
+        """
+        if hours_away > 4.0:
+            return 30
+        if hours_away > 2.0:
+            return 15
+        return 5
+
+    def _stabilise_recommendation(
+        self,
+        new_strategy: Any,
+        new_action_needed_by: datetime | None,
+        hours_to_target: float,
+    ) -> Any:
+        """Return either the stable or the new strategy, updating stable state.
+
+        A new strategy is adopted when:
+        - No stable strategy exists yet, OR
+        - The cooling *method* has changed (always adopt — urgency or de-
+          escalation must be shown immediately), OR
+        - The method is the same but the action_needed_by time has shifted by
+          more than the horizon-appropriate threshold.
+
+        Otherwise the existing stable strategy is returned unchanged, suppressing
+        churn from minor forecast oscillations.
+        """
+        if self._stable_strategy is None:
+            # First run — always adopt
+            self._stable_strategy = new_strategy
+            self._stable_action_needed_by = new_action_needed_by
+            return new_strategy
+
+        old_method = self._stable_strategy.method
+        new_method = new_strategy.method
+
+        # Method change → always adopt
+        if old_method != new_method:
+            _LOGGER.debug(
+                "%s: recommendation method changed %s → %s, adopting immediately",
+                self.room_name,
+                old_method.value,
+                new_method.value,
+            )
+            self._stable_strategy = new_strategy
+            self._stable_action_needed_by = new_action_needed_by
+            return new_strategy
+
+        # Same method — check timing shift
+        threshold_minutes = self._stable_rec_threshold_minutes(hours_to_target)
+        threshold = timedelta(minutes=threshold_minutes)
+
+        if self._stable_action_needed_by is None and new_action_needed_by is None:
+            # Both are no-action / no deadline — no change
+            return self._stable_strategy
+
+        if self._stable_action_needed_by is None or new_action_needed_by is None:
+            # One side has a deadline, other doesn't — always adopt
+            self._stable_strategy = new_strategy
+            self._stable_action_needed_by = new_action_needed_by
+            return new_strategy
+
+        shift = abs(new_action_needed_by - self._stable_action_needed_by)
+        if shift >= threshold:
+            _LOGGER.debug(
+                "%s: timing shifted %d min (threshold %d min, %.1fh horizon), "
+                "adopting new recommendation",
+                self.room_name,
+                int(shift.total_seconds() / 60),
+                threshold_minutes,
+                hours_to_target,
+            )
+            self._stable_strategy = new_strategy
+            self._stable_action_needed_by = new_action_needed_by
+            return new_strategy
+
+        # Shift is below threshold — keep stable recommendation
+        return self._stable_strategy
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from sensors and compute recommendations."""
@@ -461,6 +671,14 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "current_time": dt_util.now(),
                 "peak_afternoon_solar": self._peak_afternoon_solar_today,
                 "forecast": forecast,
+                # Rain state derived from forecast — used for close-window checks
+                # and reasoning.  rain_arriving_hours=0 means it's raining now;
+                # None means no rain forecast in the next 3 hours.
+                "raining_now": self._is_raining_now(forecast),
+                "rain_arriving_hours": self._rain_arriving_hours(forecast),
+                # Peak electricity schedule — used for AC timing advice.
+                # peak_now=None when no schedule is configured.
+                **self._get_peak_status(dt_util.now()),
             }
             
             # Calculate hours until target time
@@ -691,11 +909,25 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elif strat_start is not None and strat_cool is not None:
                 # Anchor to target_datetime - cooling_duration (fixed wall clock time).
                 # Using now + strat_start would slide by 1 min every coordinator cycle.
-                action_needed_by = self._round_to_5min(target_datetime - timedelta(hours=strat_cool))
+                raw_action_needed_by = target_datetime - timedelta(hours=strat_cool)
+                action_needed_by = self._coarsen_time(raw_action_needed_by, hours_to_target)
             else:
                 # Strategy achieves_target is False — action needed immediately
                 action_needed_by = self._round_to_5min(now)
-            
+
+            # ------------------------------------------------------------------
+            # Stable-recommendation logic
+            # Replace the stable recommendation only when the cooling *method*
+            # changes, or when the timing shift exceeds the coarsening threshold
+            # for the current horizon.  This prevents minor forecast oscillations
+            # from producing a new recommendation every 60 seconds.
+            # ------------------------------------------------------------------
+            stable_strategy = self._stabilise_recommendation(
+                new_strategy=strategy,
+                new_action_needed_by=action_needed_by,
+                hours_to_target=hours_to_target,
+            )
+
             # Check if any earlier predictions' target time has now passed and
             # record the actual indoor temp so the learning module can score them.
             await self.learning_module.try_complete_predictions(
@@ -716,7 +948,7 @@ class SmartCoolingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "current_conditions": current_conditions,
                 "prediction": prediction,
                 "with_action_prediction": with_action_prediction,
-                "strategy": strategy,
+                "strategy": stable_strategy,
                 "learned_params": self.thermal_model.params,
                 "peak_temp_closed": peak_temp_closed,
                 "peak_at_closed": peak_at_closed,

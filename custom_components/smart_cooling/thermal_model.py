@@ -183,8 +183,10 @@ class ThermalModel:
         else:
             effectiveness_multiplier = 0.0
 
-        # Wind boost
-        effective_wind = max(wind_speed, self.params["fan_equivalent_wind_speed"])
+        # Fan creates its own forced airflow; outdoor wind through the open window adds on
+        # top of that — a window must always be open for the fan to cool, so the two
+        # airflows combine rather than the larger simply overriding the smaller.
+        effective_wind = self.params["fan_equivalent_wind_speed"] + wind_speed
         wind_factor = effective_wind / 10.0  # Normalize to ~1 at 10 mph
 
         # Humidity penalty: high outdoor humidity reduces convective cooling.
@@ -234,13 +236,23 @@ class ThermalModel:
             temp_diff = simulated_temp - hour_outdoor_temp
             if temp_diff > 0:
                 alignment = wind_alignment_factor(hour_bearing, window_facing)
+                effective_wind = hour_wind * alignment
                 # Floor of 0.3 so truly still air gives near-zero ventilation
-                wind_factor = max(hour_wind * alignment, 0.3) / 10.0
+                wind_factor = max(effective_wind, 0.3) / 10.0
+                # Wind boost: at >= threshold mph, ventilation approaches fan-equivalent.
+                # Scaled linearly above threshold, capped at 2× boost.
+                threshold = self.params.get("natural_wind_boost_threshold", 5.0)
+                boost = self.params.get("natural_wind_boost_factor", 1.5)
+                if effective_wind >= threshold:
+                    wind_boost = 1.0 + (boost - 1.0) * min((effective_wind - threshold) / threshold, 1.0)
+                else:
+                    wind_boost = 1.0
                 humidity_factor = max(0.5, 1.0 - max(hour_humidity - 40.0, 0.0) * 0.005)
                 return (
                     temp_diff
                     * self.params["natural_cooling_effectiveness"]
                     * wind_factor
+                    * wind_boost
                     * humidity_factor
                 )
         return 0.0

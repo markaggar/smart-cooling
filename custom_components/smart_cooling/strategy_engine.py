@@ -41,6 +41,13 @@ class CoolingStrategy:
     # Forward-scan timing: hours from NOW until action must start, and run duration
     start_hours_from_now: float | None = None   # latest deadline to start (hours)
     strategy_hours_to_cool: float | None = None  # cooling duration once started
+    # True when AC was the physics recommendation but was suppressed because it is
+    # currently peak electricity hours and deferral to off-peak is still viable.
+    ac_deferred_peak: bool = False
+    # Recommended AC thermostat setpoint for pre-cooling before peak hours.
+    # Set when currently off-peak with peak arriving soon, so the room can
+    # coast through peak without running AC.  None when not applicable.
+    precool_setpoint: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for HA state attributes."""
@@ -54,6 +61,8 @@ class CoolingStrategy:
             "start_hours_from_now": round(self.start_hours_from_now, 2) if self.start_hours_from_now is not None else None,
             "strategy_hours_to_cool": round(self.strategy_hours_to_cool, 1) if self.strategy_hours_to_cool is not None else None,
             "alternatives": self.alternatives,
+            "ac_deferred_peak": self.ac_deferred_peak,
+            "precool_setpoint": round(self.precool_setpoint, 1) if self.precool_setpoint is not None else None,
         }
 
     @property
@@ -74,6 +83,14 @@ class CoolingStrategy:
         if self.timing:
             text += f" {self.timing}"
         return text
+
+
+def _bearing_to_compass(bearing: float | None) -> str:
+    """Convert a wind bearing in degrees to an 8-point compass label (e.g. 'S', 'NW')."""
+    if bearing is None:
+        return ""
+    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return dirs[int((bearing + 22.5) / 45) % 8]
 
 
 class StrategyEngine:
@@ -141,6 +158,10 @@ class StrategyEngine:
                 wind_speed=wind_speed,
                 predicted_open_temp=prediction.predicted_target_temp,
                 comfort_tolerance=effective_comfort_tolerance,
+                raining_now=current_conditions.get("raining_now", False),
+                rain_arriving_hours=current_conditions.get("rain_arriving_hours"),
+                wind_bearing=current_conditions.get("wind_bearing"),
+                window_facing=current_conditions.get("window_facing", []),
             )
             if close_reason:
                 return CoolingStrategy(
@@ -189,13 +210,27 @@ class StrategyEngine:
         # This is the "no extra devices" trajectory — what happens if nothing changes.
         no_action_hourly = prediction.hourly_predictions
 
+        # When the window is already open, the room is already cooling naturally.
+        # Using the no-action baseline would overestimate future indoor temps (hours 1+),
+        # making it appear harder than it is. Use the natural-strategy trajectory instead.
+        if window_open:
+            natural_baseline_pred = self.thermal_model.predict_temperature(
+                current_conditions=current_conditions,
+                hours_ahead=hours_to_target,
+                cooling_strategy="natural",
+            )
+            window_open_hourly = natural_baseline_pred.hourly_predictions
+        else:
+            window_open_hourly = no_action_hourly
+
         # Evaluate natural cooling (open window, no fan).
         # Forward scan: find the LATEST hour at which opening the window can still
         # achieve target.  Only considers hours where outdoor is ≥ min_temp_advantage
-        # cooler than the predicted indoor temp at that time.
+        # cooler than the predicted indoor temp at that time (unless outdoor is already
+        # below target, in which case cooling will reach target regardless).
         if aqi_ok:
             natural_result = self._find_latest_viable_start(
-                "natural", current_conditions, no_action_hourly,
+                "natural", current_conditions, window_open_hourly,
                 hours_to_target, tolerance_hours, check_outdoor_advantage=True,
             )
             natural_prediction = self.thermal_model.predict_temperature(
@@ -405,6 +440,24 @@ class StrategyEngine:
         if comfort_note:
             reasoning = reasoning.rstrip(".") + ". " + comfort_note + "."
 
+        ac_deferred_peak = False
+        precool_setpoint: float | None = None
+        if method in (CoolingMethod.START_AC, CoolingMethod.CONTINUE_AC):
+            should_defer, peak_note, precool_setpoint = self._peak_electricity_note(current_conditions, hours_to_target)
+            if should_defer:
+                method = CoolingMethod.NO_ACTION
+                ac_deferred_peak = True
+                # Update timing to reflect deferral instead of the AC deadline
+                peak_ends_in = current_conditions.get("peak_ends_in_hours")
+                if peak_ends_in is not None:
+                    off_peak_t = current_time + timedelta(hours=peak_ends_in)
+                    off_peak_label = off_peak_t.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+                    timing = f"defer AC until {off_peak_label}"
+                else:
+                    timing = "defer AC to off-peak"
+            if peak_note:
+                reasoning = reasoning.rstrip(".") + ". " + peak_note + "."
+
         return CoolingStrategy(
             method=method,
             timing=timing,
@@ -414,6 +467,8 @@ class StrategyEngine:
             confidence=0.7 if best_strategy["achieves_target"] else 0.4,
             start_hours_from_now=best_strategy.get("start_hours_from_now"),
             strategy_hours_to_cool=best_strategy.get("hours_to_cool"),
+            ac_deferred_peak=ac_deferred_peak,
+            precool_setpoint=precool_setpoint,
             alternatives=[
                 {
                     "method": s["method"].value,
@@ -427,6 +482,132 @@ class StrategyEngine:
             ],
         )
 
+    def _peak_electricity_note(
+        self,
+        conditions: dict[str, Any],
+        hours_to_target: float,
+    ) -> tuple[bool, str | None, float | None]:
+        """Return (should_defer, advisory_note, precool_setpoint) for peak electricity timing.
+
+        Called only when AC is the recommended method.  Uses the peak-hours
+        schedule (CONF_PEAK_SCHEDULE) where on=peak/expensive, off=off-peak/cheap.
+
+        Returns:
+          should_defer     – True when AC should be suppressed and deferred to off-peak.
+          advisory_note    – Human-readable note appended to reasoning, or None.
+          precool_setpoint – AC thermostat setpoint for pre-cooling before peak hours,
+                             or None when not applicable.
+
+        Two cases:
+          - Currently off-peak, peak coming soon: encourage pre-cooling now (no defer).
+          - Currently peak: check if AC can be deferred until off-peak without
+            missing the target time.  If yes, defer; if no, must run now.
+        """
+        peak_now: bool | None = conditions.get("peak_now")
+        if peak_now is None:
+            return False, None, None  # No schedule configured
+
+        target_temp = float(conditions.get("target_temp", 72.0))
+        current_time: datetime = conditions.get("current_time", datetime.now())
+
+        def _fmt_hours(h: float) -> str:
+            total_min = round(h * 60)
+            if total_min < 60:
+                return f"{total_min} min"
+            hrs = total_min // 60
+            mins = total_min % 60
+            return f"{hrs}h" if mins == 0 else f"{hrs}h {mins}m"
+
+        def _time_label(h: float) -> str:
+            t = current_time + timedelta(hours=h)
+            return t.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+
+        if not peak_now:
+            # Currently off-peak (cheap/solar). Peak is coming — nudge to pre-cool.
+            peak_starts_in = conditions.get("peak_starts_in_hours")
+            if peak_starts_in is None or peak_starts_in > 6.0:
+                return False, None, None  # Far off — not actionable yet
+            label = _time_label(peak_starts_in)
+
+            # Compute the AC setpoint that lets the room coast through peak without AC.
+            # Estimate peak duration conservatively as hours from peak_start to target.
+            precool_setpoint: float | None = None
+            peak_duration_estimate = hours_to_target - peak_starts_in
+            if peak_duration_estimate > 0:
+                try:
+                    drift_conditions = dict(conditions)
+                    drift_conditions["indoor_temp"] = target_temp
+                    drift_conditions["current_time"] = current_time + timedelta(hours=peak_starts_in)
+                    drift_pred = self.thermal_model.predict_temperature(
+                        current_conditions=drift_conditions,
+                        hours_ahead=peak_duration_estimate,
+                        cooling_strategy="natural",
+                    )
+                    drift = drift_pred.predicted_target_temp - target_temp
+                    if drift > 0:
+                        # Room needs to be this cool at peak_start to coast to target
+                        precool_setpoint = round(
+                            max(target_temp - drift, target_temp - 8.0, 60.0), 1
+                        )
+                except Exception:  # noqa: BLE001 — advisory only
+                    precool_setpoint = None
+
+            return False, (
+                f"Peak electricity hours start at {label} — "
+                f"good time to run AC now and pre-cool while rates are low"
+            ), precool_setpoint
+
+        # Currently in peak. Check if deferring to off-peak is viable.
+        peak_ends_in = conditions.get("peak_ends_in_hours")
+        if peak_ends_in is None or peak_ends_in >= hours_to_target:
+            # Peak covers the entire remaining window — AC must run now.
+            if peak_ends_in is None:
+                return False, "Currently in peak electricity hours — running AC now is necessary to meet target", None
+            label = _time_label(peak_ends_in)
+            return False, (
+                f"Currently in peak electricity hours until {label} — "
+                f"AC must run now to meet target on time"
+            ), None
+
+        # Off-peak time is available before target. Simulate natural drift through peak.
+        try:
+            drift_prediction = self.thermal_model.predict_temperature(
+                current_conditions=conditions,
+                hours_ahead=peak_ends_in,
+                cooling_strategy="natural",
+            )
+            temp_at_peak_end = drift_prediction.predicted_target_temp
+        except Exception:  # noqa: BLE001 — advisory only, never crash recommend()
+            return False, None, None
+
+        remaining_hours = hours_to_target - peak_ends_in
+        future_conditions = dict(conditions)
+        future_conditions["indoor_temp"] = temp_at_peak_end
+
+        try:
+            hours_needed = self.thermal_model.find_hours_to_cool_to_target(
+                current_conditions=future_conditions,
+                cooling_strategy="ac",
+                max_hours=remaining_hours + 1.0,
+            )
+        except Exception:  # noqa: BLE001
+            hours_needed = None
+
+        end_label = _time_label(peak_ends_in)
+        temp_str = f"{temp_at_peak_end:.0f}\u00b0F"
+        if hours_needed is not None and hours_needed <= remaining_hours:
+            return True, (
+                f"Peak electricity hours end at {end_label} — "
+                f"AC deferred to off-peak "
+                f"(room will be ~{temp_str} by then; AC can reach {target_temp:.0f}\u00b0F "
+                f"in ~{_fmt_hours(hours_needed)} from that point)"
+            ), None
+        return False, (
+            f"Peak electricity hours end at {end_label} — "
+            f"AC must start now; waiting for off-peak would not leave enough time "
+            f"(room would be ~{temp_str} by then)"
+        ), None
+
     def _close_window_reason(
         self,
         indoor_temp: float,
@@ -437,6 +618,10 @@ class StrategyEngine:
         wind_speed: float = 0.0,
         predicted_open_temp: float | None = None,
         comfort_tolerance: float | None = None,
+        raining_now: bool = False,
+        rain_arriving_hours: float | None = None,
+        wind_bearing: float | None = None,
+        window_facing: list[str] | None = None,
     ) -> str | None:
         """Return a reason string if the open window should be closed, else None."""
         # Bad air quality — always close
@@ -445,6 +630,26 @@ class StrategyEngine:
                 f"Close window: AQI is {aqi:.0f} (above {self.aqi_threshold} threshold). "
                 f"Switch to fan or AC for cooling."
             )
+        # Rain blowing in — close if it's actively raining AND wind is aligned with
+        # the window (or wind direction is unknown but wind speed is non-trivial).
+        if raining_now and wind_speed >= 3.0:
+            from .thermal_model import wind_alignment_factor
+            alignment = wind_alignment_factor(wind_bearing, window_facing or [])
+            # alignment > 0.5 ≈ wind within ~60° of face-on to the window
+            # unknown bearing (no window_facing configured) → alignment returns 1.0
+            if alignment >= 0.5:
+                compass = _bearing_to_compass(wind_bearing)
+                direction = f" from the {compass}" if compass else ""
+                fan_note = (
+                    f"switch to a fan in a non-{compass}-facing window"
+                    if compass else
+                    "switch to a fan in a window not facing into the wind"
+                )
+                return (
+                    f"Close window: it is raining with {wind_speed:.0f} mph wind"
+                    f"{direction} — rain may be blowing into the room. "
+                    f"Close this window and {fan_note} or use AC if cooling is still needed."
+                )
         # Outside warmer than inside — window is bringing heat in
         if outdoor_temp >= indoor_temp:
             return (
@@ -596,7 +801,14 @@ class StrategyEngine:
                 outdoor_at_offset = fcast.get(
                     "temperature", current_conditions.get("outdoor_temp", 70.0)
                 )
-                if indoor_at_offset - outdoor_at_offset < self.min_temp_advantage:
+                target_temp_scan = current_conditions.get("target_temp", 72.0)
+                # Only skip this hour if outdoor is ≥ target temp AND the temp advantage
+                # vs current indoor is insufficient.  When outdoor is already below target,
+                # natural cooling can reach target regardless of the indoor-outdoor gap.
+                if (
+                    outdoor_at_offset >= target_temp_scan
+                    and indoor_at_offset - outdoor_at_offset < self.min_temp_advantage
+                ):
                     continue  # Outside not cool enough to bother at this hour
 
             shifted = dict(current_conditions)
@@ -636,6 +848,8 @@ class StrategyEngine:
         outdoor_temp = conditions.get("outdoor_temp", 70.0)
         outdoor_humidity = conditions.get("outdoor_humidity", 50.0)
         target_temp = conditions.get("target_temp", 72.0)
+        wind_speed_val = float(conditions.get("wind_speed", 0.0))
+        wind_bearing_val = conditions.get("wind_bearing")
         forecast = conditions.get("forecast", [])
         current_time: datetime = conditions.get("current_time", datetime.now())
         hours_to_cool = strategy.get("hours_to_cool")
@@ -719,10 +933,11 @@ class StrategyEngine:
                 parts.append(f"Outside is {outdoor_temp:.1f}°F (currently only {diff:.1f}°F cooler than inside)")
 
         # --- Humidity note if it's materially affecting fan/window cooling ---
-        if method in (
+        _passive_methods = (
             CoolingMethod.START_FAN, CoolingMethod.CONTINUE_FAN,
             CoolingMethod.OPEN_WINDOW, CoolingMethod.KEEP_WINDOW_OPEN,
-        ):
+        )
+        if method in _passive_methods:
             avg_humidity = (
                 sum(forecast_humidities) / len(forecast_humidities)
                 if forecast_humidities else outdoor_humidity
@@ -732,6 +947,57 @@ class StrategyEngine:
                 parts.append(
                     f"High outdoor humidity ({avg_humidity:.0f}% RH) is reducing "
                     f"ventilation effectiveness by ~{reduction_pct}%"
+                )
+
+        # --- Wind note for passive strategies ---
+        # Always acknowledge wind when it is a meaningful factor in the recommendation,
+        # so the user can see that the breeze was considered.
+        if method in _passive_methods and wind_speed_val >= 3.0:
+            compass = _bearing_to_compass(wind_bearing_val)
+            direction = f" {compass}" if compass else ""
+            if wind_speed_val >= 8.0:
+                parts.append(
+                    f"Strong wind ({wind_speed_val:.0f} mph{direction}) is boosting ventilation "
+                    f"through the window"
+                )
+            elif wind_speed_val >= 5.0:
+                parts.append(
+                    f"Moderate wind ({wind_speed_val:.0f} mph{direction}) is contributing to "
+                    f"air exchange through the window"
+                )
+            else:
+                parts.append(
+                    f"Light wind ({wind_speed_val:.0f} mph{direction}) is helping with air exchange"
+                )
+
+        # --- Cross-ventilation hint ---
+        # Wind needs an exit path — if only one window is open the pressure backs up
+        # and cooling is significantly less effective.  We have no sensor on the second
+        # window, so we can only remind the user rather than enforce it.
+        if method in _passive_methods and wind_speed_val >= 3.0:
+            parts.append(
+                "For best results open a second window or door on the opposite side "
+                "of the room so warm air has somewhere to escape"
+            )
+
+        # --- Upcoming rain warning ---
+        # Warn when rain is forecast soon so the user can decide whether to close a
+        # wind-facing window before water comes in.
+        raining_now = conditions.get("raining_now", False)
+        rain_arriving_hours = conditions.get("rain_arriving_hours")
+        if method in _passive_methods and not raining_now and rain_arriving_hours is not None:
+            if rain_arriving_hours == 0:
+                pass  # Already handled by _close_window_reason → CLOSE_WINDOW path
+            elif rain_arriving_hours <= 1:
+                parts.append(
+                    "Rain is forecast within the next hour — be ready to close "
+                    "wind-facing windows if it starts blowing in"
+                )
+            else:
+                hrs = int(rain_arriving_hours)
+                parts.append(
+                    f"Rain is forecast in about {hrs} hour{'s' if hrs != 1 else ''} — "
+                    f"plan to close wind-facing windows before it arrives"
                 )
 
         # --- AQI note ---
@@ -768,6 +1034,14 @@ class StrategyEngine:
             return f"{ch}h {cm}m" if ch > 0 else f"{cm} min"
 
         if method in (CoolingMethod.OPEN_WINDOW, CoolingMethod.KEEP_WINDOW_OPEN):
+            start_offset = strategy.get("start_hours_from_now", 0.0) or 0.0
+            if start_offset > 1.0 and deficit > 4.0:
+                viable_dt = current_time + timedelta(hours=start_offset)
+                h_str = viable_dt.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+                parts.append(
+                    f"Room is warm now but outdoor air isn\u2019t cool enough to help yet — "
+                    f"opening the window around {h_str} will be effective"
+                )
             if hours_to_cool is not None:
                 parts.append(f"Natural ventilation will reach target in {_cool_time_str(hours_to_cool)}")
                 if forecast_temps and min(forecast_temps) < target_temp:
@@ -788,6 +1062,13 @@ class StrategyEngine:
                     parts.append("Natural ventilation alone is not enough — fan needed")
             if hours_to_cool is not None:
                 start_offset = strategy.get("start_hours_from_now", 0.0) or 0.0
+                if start_offset > 1.0 and deficit > 4.0:
+                    viable_dt = current_time + timedelta(hours=start_offset)
+                    h_str = viable_dt.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
+                    parts.append(
+                        f"Room is warm now but outdoor air isn\u2019t cool enough yet — "
+                        f"starting the fan around {h_str} will be effective"
+                    )
                 if start_offset > 0.25:
                     fan_start_time = current_time + timedelta(hours=start_offset)
                     h_str = fan_start_time.strftime("%I:%M %p").lstrip("0") or "12:00 AM"
@@ -826,9 +1107,15 @@ class StrategyEngine:
                             f"won't drop below target — fan/window cannot cool the room"
                         )
                     else:
+                        compass = _bearing_to_compass(wind_bearing_val)
+                        direction = f" {compass}" if compass else ""
+                        wind_detail = (
+                            f" ({wind_speed_val:.0f} mph{direction} wind evaluated)"
+                            if wind_speed_val >= 2.0 else ""
+                        )
                         parts.append(
-                            f"Fan cannot reach {target_temp:.0f}°F within the available "
-                            f"time window — AC required"
+                            f"Fan with open window{wind_detail} cannot reach {target_temp:.0f}°F "
+                            f"within the available time window — AC required"
                         )
             if hours_to_cool is not None:
                 start_offset = strategy.get("start_hours_from_now", 0.0) or 0.0
